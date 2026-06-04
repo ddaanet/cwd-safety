@@ -1,0 +1,75 @@
+# cwd-safety
+
+A Claude Code plugin that keeps the agent's Bash working directory at
+project root. The agent runs Bash from the project root or not at all —
+no silent drift into a subdirectory, no commands that quietly report on
+the wrong place.
+
+## Why
+
+Working-directory drift is a quiet failure mode: the agent runs `cd
+subdir` (often a git submodule), and every later command runs from there.
+A `git status` or `ls` from the wrong directory does not error — it
+returns *plausible but wrong* information that the agent then treats as
+authoritative. cwd-safety makes the project root a hard boundary so that
+class of confusion can't start.
+
+## How it works
+
+A single Python hook (`scripts/cwd-safety.py`) fires on **`PreToolUse`**
+and **`PostToolUse`** for the **Bash** tool. With project root `R`
+(`$CLAUDE_PROJECT_DIR`) and the command's current working directory `W`:
+
+| Situation | Decision |
+|-----------|----------|
+| At root (`W == R`), command isn't a `cd` | **allow** silently |
+| `cd R` or `cd R && <cmd>` (root-anchored) | **allow** from anywhere |
+| Any other leading `cd` (`cd subdir`, `cd ..`, `cd -`) | **block** — even at root |
+| Drifted (`W != R`), any other command | **block**, with the restore command |
+| `PostToolUse` and drifted (`W != R`) | **warn** (agent + user channels) |
+
+The pre-use side stops drift *before* it happens — a bare `cd <subdir>`
+is the most common cause, so it's refused outright, even from root. The
+post-use side is a backstop that warns after drift the pre-use gate can't
+intercept (e.g. `pushd`).
+
+### Running a command from somewhere other than root
+
+- **Run from root in one line:** `cd /path/to/root && <command>` — the
+  `&&` guarantees the command runs only if the `cd` succeeds.
+- **Touch a subdirectory without drifting:** use a subshell,
+  `(cd subdir && <command>)` — the directory change doesn't persist, so
+  it's allowed.
+- **Restore after drift:** `cd /path/to/root`.
+
+Path matching is exact — the `cd` target must equal `$CLAUDE_PROJECT_DIR`
+literally (no normalization, no prefix matching). Only `&&` is accepted
+after a root-anchored `cd`; `;` and `||` are not.
+
+## Installation
+
+From the `ddaanet` marketplace:
+
+```
+/plugin marketplace add ddaanet/claude-plugins
+/plugin install cwd-safety@ddaanet
+```
+
+The hook activates wherever the plugin is enabled (resolved through
+Claude Code's normal `enabledPlugins` scope chain). No per-repo files are
+written — disabling the plugin removes the hook with it.
+
+## Limitations
+
+- `pushd`/`popd` aren't intercepted at PreToolUse (only `cd`); they're
+  caught after the fact by the PostToolUse warning.
+- A contrived `cd R && cd subdir && <cmd>` passes the pre-use gate and
+  drifts; the PostToolUse warning is the backstop.
+- Single root only — keyed to one `$CLAUDE_PROJECT_DIR`. Multi-root /
+  nested-worktree setups enforce just that one root.
+
+See `DESIGN.md` for the full requirements, decisions, and history.
+
+## License
+
+MIT

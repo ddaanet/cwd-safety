@@ -1,0 +1,9 @@
+*.pyc
+__pycache__/
+.DS_Store
+
+.claude/settings.local.json
+
+# Provisional handoff scratch — until gitlore is installed
+.claude/handoff.md
+.claude/handoff-task.md
