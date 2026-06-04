@@ -11,5 +11,9 @@
         ]
       }
     ]
+  },
+  "gitlore": {
+    "enabled": true,
+    "precommitCommand": "just precommit"
   }
 }
