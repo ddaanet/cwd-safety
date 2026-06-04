@@ -22,6 +22,10 @@ hook that keeps the agent's working directory at project root. See
 - `plugin-dev/` — vendored `claude-plugin-dev` toolkit (release recipe +
   version-guard hook). Do not edit by hand; update with
   `just update-plugin-dev vX.Y.Z`.
+- `memory/` — gitlore submodule (remote `cwd-safety-gitlore-memory`) holding
+  the agent's auto-memory. gitlore's commit/push hooks sync it; don't `git add`
+  or commit memory content into the parent repo by hand. After a fresh
+  checkout it may show uninitialized — `git submodule init memory` to register.
 
 ## Quality gate
 
