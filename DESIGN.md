@@ -17,33 +17,40 @@ at all.
 **FR1.** The hook fires on `PreToolUse(Bash)` and `PostToolUse(Bash)` only.
 No other tool events trigger it.
 
-**FR2.** The hook reads `$CLAUDE_PROJECT_DIR` for the authoritative project
-root `R` and `cwd` from hook stdin for the current working directory `W`.
+**FR2.** The hook reads `$CLAUDE_PROJECT_DIR` for the project root and `cwd`
+from hook stdin. The **effective root** `E` is the enclosing git-worktree root
+when `cwd` is inside a worktree of `$CLAUDE_PROJECT_DIR` — detected from the
+on-disk `.git` linkage (a worktree's `.git` is a file whose `gitdir:` resolves
+under `$CLAUDE_PROJECT_DIR/.git`) — otherwise `$CLAUDE_PROJECT_DIR`. All
+decisions below are made against `E`.
 
-**FR3 (allow-silent).** On `PreToolUse`: if `W == R` and the command `C` does
+**FR3 (allow-silent).** On `PreToolUse`: if `W == E` and the command `C` does
 not begin with `cd`, the hook exits 0 silently (no output, no block).
 
-**FR4 (root-anchored allow).** On `PreToolUse`: the command forms `cd R`,
-`cd "R"`, `cd 'R'`, `cd R && <rest>`, `cd "R" && <rest>`, and
-`cd 'R' && <rest>` — where `R` is an exact match for `$CLAUDE_PROJECT_DIR`,
+**FR4 (root-anchored allow).** On `PreToolUse`: the command forms `cd E`,
+`cd "E"`, `cd 'E'`, `cd E && <rest>`, `cd "E" && <rest>`, and
+`cd 'E' && <rest>` — where `E` is an exact match for the effective root,
 and `&&` is the only accepted separator — are allowed from any `W`. No other
 separator (`; `, `||`) qualifies.
 
 **FR5 (proactive cd block).** On `PreToolUse`: any command whose first token
 is `cd` (i.e., `cd`, `cd …`, `cd;…`, or `cd&&…`, but not `cdfoo`) that does
 not satisfy FR4 is blocked with exit 2 and a stderr message — even when
-`W == R`. The message names the project root and offers three sanctioned
-alternatives: absolute paths, the `cd R && <command>` form, and a
-non-persisting subshell `(cd subdir && <command>)`.
+`W == E`. The message names the effective root and offers three sanctioned
+alternatives: absolute paths, the `cd E && <command>` form, and a
+non-persisting subshell `(cd subdir && <command>)`. When a worktree is active,
+this includes a `cd` back to `$CLAUDE_PROJECT_DIR`: leaving a worktree is done
+with the `ExitWorktree` tool, not a raw `cd`. The block message is
+worktree-aware and names `ExitWorktree`.
 
-**FR6 (drift block).** On `PreToolUse`: if `W != R` and the command is not
+**FR6 (drift block).** On `PreToolUse`: if `W != E` and the command is not
 the root-anchored form (FR4) and does not trigger FR5, the hook blocks with
 exit 2 and a stderr message showing the current `W` and the restore command
-`cd R`.
+`cd E`.
 
-**FR7 (post-use warn).** On `PostToolUse`: if `W != R`, the hook emits a JSON
+**FR7 (post-use warn).** On `PostToolUse`: if `W != E`, the hook emits a JSON
 payload containing `hookSpecificOutput.additionalContext` and `systemMessage`
-with a warning showing `W` and the restore command. If `W == R`, the hook
+with a warning showing `W` and the restore command. If `W == E`, the hook
 exits 0 silently.
 
 **FR8 (wiring).** `hooks/hooks.json` registers `scripts/cwd-safety.py` via
@@ -58,7 +65,9 @@ compatibility).
 
 **NFR1 (determinism).** Given identical `W`, `R`, and `C`, the hook always
 produces the same decision. No randomness, no external I/O, no mutable state
-beyond stdin/stdout/stderr.
+beyond stdin/stdout/stderr. Worktree detection reads the filesystem (`os.path`
+stat calls and one `.git` file); the hook is deterministic *given filesystem
+state*. It performs no network access and spawns no subprocess.
 
 **NFR2 (no false positives).** A command that satisfies FR4 is never blocked,
 regardless of what follows the `&&`. A command run from `W == R` that does not
@@ -66,7 +75,9 @@ start with `cd` is never blocked.
 
 **NFR3 (zero runtime dependencies).** The hook uses Python 3 stdlib only
 (`json`, `os`, `re`, `sys`). No third-party packages, no subprocess calls, no
-network access.
+network access. **Exception:** worktree detection performs read-only filesystem
+access (stat + reading a `.git` file). It remains subprocess-free and
+network-free.
 
 **NFR4 (low latency).** The hook completes in well under the 5-second timeout
 registered in `hooks.json`. All logic is in-process; there are no forked
@@ -212,6 +223,38 @@ was the natural point to rename it to match what it actually does.
 **Alternatives considered:** Keep the name for continuity. Rejected: the name
 actively misleads about the scope of the guard.
 
+### (h) Worktrees: single effective root, filesystem detection
+
+**Decision:** When `cwd` is inside a git worktree of `$CLAUDE_PROJECT_DIR`, the
+hook uses that worktree root as the single effective root `E`; otherwise
+`E = $CLAUDE_PROJECT_DIR`. The worktree is detected from the on-disk `.git`
+linkage — walk up from `cwd` to the first ancestor whose `.git` is a file whose
+`gitdir:` resolves under `$CLAUDE_PROJECT_DIR/.git`. A `cd` back to the project
+root while a worktree is active is blocked (use `ExitWorktree`).
+
+**Rationale:** A worktree changes the session `cwd` while leaving
+`$CLAUDE_PROJECT_DIR` at the original repo root, so the unmodified hook blocked
+every command issued from a worktree. The correct anchor there is the worktree
+root. Detection cannot use a hook payload field — empirical capture of a real
+PreToolUse payload from inside a managed worktree showed **no `worktree` field
+exists** (a contrary claim was confabulated from web search). It cannot use the
+`.claude/worktrees/<name>` path convention either, because `EnterWorktree` can
+enter a worktree at an arbitrary path and the location is relocatable. The git
+`.git`-file linkage is the authoritative on-disk record and ties a worktree to
+a specific main repo, so it covers every location and cannot be spoofed by
+merely sitting in a directory named `worktrees`. A *single* effective root
+(rather than accepting both roots) suffices because `ExitWorktree` restores
+`cwd`, making the clean lifecycle "work in worktree → exit → merge from main";
+no single Bash call legitimately needs both roots. The cost is read-only
+filesystem access (see NFR1/NFR3); the exact-match principle of decision (d) is
+preserved for the `cd E` command match — only detection reads the filesystem.
+
+**Alternatives considered:** (1) Trust a `worktree` payload field — rejected, it
+does not exist. (2) `.claude/worktrees/` path convention — rejected, arbitrary
+and relocated worktrees defeat it. (3) Accept both `R` and the worktree root —
+rejected; `ExitWorktree` makes exit-then-merge the clean path. (4) Have the hook
+set the Bash cwd — impossible; hook output cannot redirect the tool's cwd.
+
 ## Limitations
 
 - **`pushd`/`popd` are not intercepted.** The `_LEADING_CD` regex only matches
@@ -232,6 +275,11 @@ actively misleads about the scope of the guard.
 - **No quote normalization in `_LEADING_CD`.** The leading-cd regex
   `^cd(?:\s|;|&|$)` detects the unquoted `cd` builtin. A quoted `'cd'` or
   `\cd` invocation is not matched, though those forms are unusual in practice.
+
+- **Worktree detection reads the filesystem.** Unlike the rest of the hook it
+  is not pure-stdin; it stats ancestors of `cwd` and reads one `.git` file. A
+  worktree whose `.git` linkage does not resolve under `$CLAUDE_PROJECT_DIR/.git`
+  (e.g. a different repo) is treated as drift, not as a valid anchor.
 
 ## History
 
@@ -279,3 +327,10 @@ commit `b7e48cd`). Both symlinks were removed in their respective repos on
 Hook renamed to match its actual scope. Rule 3 (proactive leading-cd block,
 even from root) added. Script relocated to `scripts/cwd-safety.py`; wired via
 `hooks/hooks.json` using `${CLAUDE_PLUGIN_ROOT}` for portability.
+
+**2026-06 — honor git worktrees** (this repo). The hook now anchors to the
+enclosing git-worktree root as a single effective root, detected from the
+on-disk `.git` linkage (there is no worktree hook-payload field — verified
+empirically), falling back to `$CLAUDE_PROJECT_DIR` otherwise. `cd` back to
+main while a worktree is active is blocked in favor of `ExitWorktree`; block and
+warn messages are worktree-aware. See decision (h).

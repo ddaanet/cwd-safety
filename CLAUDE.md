@@ -39,15 +39,19 @@ and runs the test suite. Must be green before committing.
 ## The behavioral contract
 
 Canonical statement lives in `DESIGN.md` (FR1–FR9). In short, at
-`PreToolUse(Bash)` with root `R` and cwd `W`:
+`PreToolUse(Bash)` with **effective root `E`** (the enclosing git-worktree root
+when `cwd` is inside a worktree of `$CLAUDE_PROJECT_DIR`, detected from the
+on-disk `.git` linkage, else `$CLAUDE_PROJECT_DIR`) and cwd `W`:
 
-1. `W == R` and `C` is not a `cd` → allow silently.
-2. `cd R` / `cd R && <rest>` (exact-path, `&&`-only) → allow from any `W`.
-3. Any other leading `cd` → **block, even when `W == R`** (proactive
+1. `W == E` and `C` is not a `cd` → allow silently.
+2. `cd E` / `cd E && <rest>` (exact-path, `&&`-only) → allow from any `W`.
+3. Any other leading `cd` → **block, even when `W == E`** (proactive
    drift prevention — this is the rule added when the hook was extracted).
-4. `W != R`, any other command → block with the `cd R` restore hint.
+   When a worktree is active this includes `cd $CLAUDE_PROJECT_DIR` — leave a
+   worktree with the `ExitWorktree` tool, not `cd`.
+4. `W != E`, any other command → block with the `cd E` restore hint.
 
-At `PostToolUse(Bash)`: if `W != R`, emit a warning on both
+At `PostToolUse(Bash)`: if `W != E`, emit a warning on both
 `hookSpecificOutput.additionalContext` and `systemMessage`; else silent.
 
 ## Conventions
@@ -73,6 +77,12 @@ At `PostToolUse(Bash)`: if `W != R`, emit a warning on both
 - **`plugin.json`'s `.version` is the last released version**; the
   `release` recipe bumps it and the vendored version-guard hook blocks
   manual edits.
+- **Effective root via filesystem detection.** `main()` computes
+  `effective_root = _worktree_root(cwd, project_dir) or project_dir` and threads
+  it into both handlers. `_worktree_root` walks up `cwd` and reads the `.git`
+  linkage to recognize a worktree of the project — there is no payload field for
+  this. Read-only filesystem access; the `cd E` match stays exact. See
+  `DESIGN.md` → decision (h).
 
 ## Non-goals
 
