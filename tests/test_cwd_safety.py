@@ -168,6 +168,23 @@ if wt_warned:
 check("wt: PostToolUse drift inside wt warns", wt_warned)
 
 
+# ── Worktree-aware messages ─────────────────────────────────────────────────
+check("wt: cd-block message names ExitWorktree",
+      blocked_with("PreToolUse", WT, "cd subdir", "ExitWorktree", root=PROJ))
+check("wt: cd-to-main block names ExitWorktree",
+      blocked_with("PreToolUse", WT, f"cd {PROJ} && git merge", "ExitWorktree", root=PROJ))
+check("wt: drift-block message says 'worktree'",
+      blocked_with("PreToolUse", WTSUB, "ls", "worktree", root=PROJ))
+
+code, out, _err = run("PostToolUse", WTSUB, "ls", root=PROJ)
+post_wt = code == 0 and "additionalContext" in out and "worktree" in out
+check("wt: PostToolUse warning says 'worktree'", post_wt)
+
+# Non-worktree messages must NOT mention ExitWorktree (no regression in wording)
+_c, _o, err_nonwt = run("PreToolUse", ROOT, "cd subdir")
+check("no wt: cd-block message omits ExitWorktree", "ExitWorktree" not in err_nonwt)
+
+
 if _fails:
     print(f"\n{_fails} test(s) failed")
     sys.exit(1)

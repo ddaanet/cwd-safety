@@ -153,7 +153,17 @@ def _block(message: str) -> None:
 
 
 def _cd_block_message(root: str, in_worktree: bool) -> str:
-    """Rule 3 block text (worktree-aware variant added in Task 3)."""
+    """Rule 3 block text; worktree-aware when a worktree is active."""
+    if in_worktree:
+        return (
+            "❌ Bash command blocked: `cd` away from the active worktree "
+            "causes working-directory drift.\n"
+            f"Active worktree root: {root}\n"
+            "Instead: use absolute paths, run from the worktree root with "
+            f"`cd {root} && <command>`, or scope the change to a subshell "
+            "that does not persist, e.g. `(cd subdir && <command>)`.\n"
+            "To leave the worktree entirely, use the ExitWorktree tool — not `cd`."
+        )
     return (
         "❌ Bash command blocked: `cd` away from project root causes "
         "working-directory drift.\n"
@@ -165,7 +175,15 @@ def _cd_block_message(root: str, in_worktree: bool) -> str:
 
 
 def _drift_block_message(cwd: str, root: str, in_worktree: bool) -> str:
-    """Rule 4 block text (worktree-aware variant added in Task 3)."""
+    """Rule 4 block text; worktree-aware when a worktree is active."""
+    if in_worktree:
+        return (
+            "❌ Bash commands blocked: working directory is not the active "
+            "worktree root.\n"
+            f"Current: {cwd}\n"
+            f"Run this command to restore: cd {root}\n"
+            "To leave the worktree entirely, use the ExitWorktree tool."
+        )
     return (
         "❌ Bash commands blocked: working directory is not project root.\n"
         f"Current: {cwd}\n"
@@ -174,7 +192,13 @@ def _drift_block_message(cwd: str, root: str, in_worktree: bool) -> str:
 
 
 def _drift_warn_message(cwd: str, root: str, in_worktree: bool) -> str:
-    """Rule 5 warning text (worktree-aware variant added in Task 3)."""
+    """Rule 5 warning text; worktree-aware when a worktree is active."""
+    if in_worktree:
+        return (
+            f"⚠️  Working directory is not the active worktree root: {cwd}\n"
+            "Bash is blocked until cwd is restored.\n"
+            f"Run: cd {root}"
+        )
     return (
         f"⚠️  Working directory changed to: {cwd}\n"
         "Bash is blocked until cwd is restored.\n"
