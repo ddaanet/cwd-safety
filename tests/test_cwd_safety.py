@@ -15,14 +15,25 @@ import sys
 
 ROOT = "/project/root"  # the pretend $CLAUDE_PROJECT_DIR for these cases
 SUB = "/project/root/subdir"
+WT = "/home/user/wt-feature"   # an active worktree root (deliberately OUT of tree:
+WTSUB = WT + "/src"            # proves detection is field-based, not path-based)
+
+_UNSET = object()  # sentinel: distinguishes "omit worktree" from null/"" /path
+
 HOOK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts", "cwd-safety.py")
 
 _fails = 0
 
 
-def run(event, cwd, command=""):
-    """Invoke the hook; return (exit_code, stdout, stderr)."""
+def run(event, cwd, command="", worktree=_UNSET):
+    """Invoke the hook; return (exit_code, stdout, stderr).
+
+    worktree: _UNSET omits the key entirely; any other value (a path, "",
+    or None) is placed in the payload verbatim (None serializes to JSON null).
+    """
     payload = {"hook_event_name": event, "cwd": cwd, "tool_input": {"command": command}}
+    if worktree is not _UNSET:
+        payload["worktree"] = worktree
     env = dict(os.environ, CLAUDE_PROJECT_DIR=ROOT)
     proc = subprocess.run(
         [sys.executable, HOOK],
@@ -43,16 +54,22 @@ def check(label, cond):
         _fails += 1
 
 
-def allowed(event, cwd, command=""):
+def allowed(event, cwd, command="", worktree=_UNSET):
     """Assert: exit 0, nothing on stderr (silent allow)."""
-    code, _out, err = run(event, cwd, command)
+    code, _out, err = run(event, cwd, command, worktree)
     return code == 0 and err == ""
 
 
-def blocked(event, cwd, command):
+def blocked(event, cwd, command, worktree=_UNSET):
     """Assert: exit 2, a message on stderr."""
-    code, _out, err = run(event, cwd, command)
+    code, _out, err = run(event, cwd, command, worktree)
     return code == 2 and err != ""
+
+
+def blocked_with(event, cwd, command, needle, worktree=_UNSET):
+    """Assert: exit 2 and `needle` appears in stderr."""
+    code, _out, err = run(event, cwd, command, worktree)
+    return code == 2 and needle in err
 
 
 # ── Rule 1: at root, non-cd commands pass silently ──────────────────────────
@@ -93,6 +110,34 @@ check("PostToolUse drifted: emits warning JSON, exit 0", warned)
 
 # ── Unknown events are inert ────────────────────────────────────────────────
 check("unknown event: exit 0, silent", allowed("SessionStart", SUB, "anything"))
+
+
+# ── Worktree: active worktree root is the effective anchor ───────────────────
+check("wt active: `ls` at wt root allowed", allowed("PreToolUse", WT, "ls", worktree=WT))
+check("wt active: bare `cd WT` allowed", allowed("PreToolUse", WT, f"cd {WT}", worktree=WT))
+check("wt active: `cd WT && ls` allowed", allowed("PreToolUse", WT, f"cd {WT} && ls", worktree=WT))
+check("wt active: `cd subdir` blocked", blocked("PreToolUse", WT, "cd subdir", worktree=WT))
+check("wt active: `cd ROOT` (leave via cd) blocked",
+      blocked("PreToolUse", WT, f"cd {ROOT} && git merge", worktree=WT))
+check("wt active: drift inside wt blocked", blocked("PreToolUse", WTSUB, "ls", worktree=WT))
+check("wt active: cwd at main (not wt root) blocked",
+      blocked("PreToolUse", ROOT, "ls", worktree=WT))
+
+# PostToolUse against the effective root
+code, out, _err = run("PostToolUse", WT, "ls", worktree=WT)
+check("wt active: PostToolUse at wt root silent", code == 0 and out == "")
+
+code, out, _err = run("PostToolUse", WTSUB, "ls", worktree=WT)
+wt_warned = code == 0 and "additionalContext" in out
+if wt_warned:
+    parsed = json.loads(out)
+    wt_warned = WTSUB in parsed["hookSpecificOutput"]["additionalContext"]
+check("wt active: PostToolUse drift inside wt warns", wt_warned)
+
+# ── Fallback: absent / null / empty worktree behaves exactly like no worktree ─
+check("worktree null: `ls` at ROOT allowed", allowed("PreToolUse", ROOT, "ls", worktree=None))
+check("worktree empty: `ls` at ROOT allowed", allowed("PreToolUse", ROOT, "ls", worktree=""))
+check("worktree null: drift at SUB blocked", blocked("PreToolUse", SUB, "ls", worktree=None))
 
 
 if _fails:

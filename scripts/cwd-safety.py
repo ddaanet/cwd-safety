@@ -40,29 +40,36 @@ _LEADING_CD = re.compile(r"^cd(?:\s|;|&|$)")
 
 
 def main() -> None:
-    """Dispatch on hook event; project root is always allowed."""
+    """Dispatch on hook event; the effective root is always allowed.
+
+    The effective root is the active worktree root when Claude Code reports
+    one (the ``worktree`` field in the hook payload), else ``$CLAUDE_PROJECT_DIR``.
+    """
     hook_input = json.load(sys.stdin)
 
     event_name = hook_input.get("hook_event_name", "")
     cwd = hook_input.get("cwd", "")
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+    worktree = hook_input.get("worktree") or ""  # absent / null / "" → no worktree
+    effective_root = worktree or project_dir
+    in_worktree = bool(worktree)
 
     if event_name == "PreToolUse":
-        handle_pretooluse(hook_input, cwd, project_dir)
+        handle_pretooluse(hook_input, cwd, effective_root, in_worktree)
     elif event_name == "PostToolUse":
-        handle_posttooluse(cwd, project_dir)
+        handle_posttooluse(cwd, effective_root, in_worktree)
     else:
         sys.exit(0)
 
 
-def _is_cd_to_root(command: str, project_dir: str) -> bool:
+def _is_cd_to_root(command: str, root: str) -> bool:
     """True if ``command`` is the sanctioned root-anchored form.
 
     Matches bare ``cd <root>`` and ``cd <root> && <rest>``, with the path
     unquoted, "double"-quoted, or 'single'-quoted. Rejects ``;`` and ``||``
     separators — only ``&&`` preserves the cd-first invariant.
     """
-    escaped = re.escape(project_dir)
+    escaped = re.escape(root)
     pattern = rf"""^cd\s+(?:{escaped}|"{escaped}"|'{escaped}')\s*(?:&&\s*.+)?$"""
     return bool(re.match(pattern, command))
 
@@ -73,48 +80,63 @@ def _block(message: str) -> None:
     sys.exit(2)
 
 
-def handle_pretooluse(hook_input: dict, cwd: str, project_dir: str) -> None:
+def _cd_block_message(root: str, in_worktree: bool) -> str:
+    """Rule 3 block text (worktree-aware variant added in Task 3)."""
+    return (
+        "❌ Bash command blocked: `cd` away from project root causes "
+        "working-directory drift.\n"
+        f"Project root: {root}\n"
+        "Instead: use absolute paths, run from root with "
+        f"`cd {root} && <command>`, or scope the change to a "
+        "subshell that does not persist, e.g. `(cd subdir && <command>)`."
+    )
+
+
+def _drift_block_message(cwd: str, root: str, in_worktree: bool) -> str:
+    """Rule 4 block text (worktree-aware variant added in Task 3)."""
+    return (
+        "❌ Bash commands blocked: working directory is not project root.\n"
+        f"Current: {cwd}\n"
+        f"Run this command to restore: cd {root}"
+    )
+
+
+def _drift_warn_message(cwd: str, root: str, in_worktree: bool) -> str:
+    """Rule 5 warning text (worktree-aware variant added in Task 3)."""
+    return (
+        f"⚠️  Working directory changed to: {cwd}\n"
+        "Bash is blocked until cwd is restored.\n"
+        f"Run: cd {root}"
+    )
+
+
+def handle_pretooluse(hook_input: dict, cwd: str, root: str, in_worktree: bool) -> None:
     """Allow root-anchored commands; block drift-inducing cd and wrong-cwd work."""
     command = hook_input.get("tool_input", {}).get("command", "").strip()
 
     # Rule 2: the sanctioned root-anchored form is always allowed.
-    if _is_cd_to_root(command, project_dir):
+    if _is_cd_to_root(command, root):
         sys.exit(0)
 
     # Rule 3: any other leading `cd` is drift — block it before it happens,
-    # even when already at project root.
+    # even when already at the effective root.
     if _LEADING_CD.match(command):
-        _block(
-            "❌ Bash command blocked: `cd` away from project root causes "
-            "working-directory drift.\n"
-            f"Project root: {project_dir}\n"
-            "Instead: use absolute paths, run from root with "
-            f"`cd {project_dir} && <command>`, or scope the change to a "
-            "subshell that does not persist, e.g. `(cd subdir && <command>)`."
-        )
+        _block(_cd_block_message(root, in_worktree))
 
-    # Rule 1: any other command from project root is fine.
-    if cwd == project_dir:
+    # Rule 1: any other command from the effective root is fine.
+    if cwd == root:
         sys.exit(0)
 
     # Rule 4: drift already happened — block until cwd is restored.
-    _block(
-        "❌ Bash commands blocked: working directory is not project root.\n"
-        f"Current: {cwd}\n"
-        f"Run this command to restore: cd {project_dir}"
-    )
+    _block(_drift_block_message(cwd, root, in_worktree))
 
 
-def handle_posttooluse(cwd: str, project_dir: str) -> None:
+def handle_posttooluse(cwd: str, root: str, in_worktree: bool) -> None:
     """Warn (non-blocking) after cwd drift is detected."""
-    if cwd == project_dir:
+    if cwd == root:
         sys.exit(0)
 
-    warning = (
-        f"⚠️  Working directory changed to: {cwd}\n"
-        "Bash is blocked until cwd is restored.\n"
-        f"Run: cd {project_dir}"
-    )
+    warning = _drift_warn_message(cwd, root, in_worktree)
 
     output = {
         "hookSpecificOutput": {
