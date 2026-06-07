@@ -11,9 +11,11 @@ hook that keeps the agent's working directory at project root. See
 ## Layout
 
 - `scripts/cwd-safety.py` — the hook. Reads the hook JSON from stdin,
-  dispatches on `hook_event_name`, decides against `$CLAUDE_PROJECT_DIR`
-  (root `R`) and the payload's `cwd` (`W`). Pure stdlib, no I/O beyond
-  stdin/stdout/stderr.
+  dispatches on `hook_event_name`, decides against the effective root `E`
+  (the enclosing git-worktree root if `cwd` is in a worktree of
+  `$CLAUDE_PROJECT_DIR`, else `$CLAUDE_PROJECT_DIR`) and the payload's `cwd`
+  (`W`). Pure stdlib; read-only filesystem access for worktree detection,
+  otherwise no I/O beyond stdin/stdout/stderr.
 - `hooks/hooks.json` — registers the script on `PreToolUse[Bash]` and
   `PostToolUse[Bash]`, both via `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/cwd-safety.py`.
 - `tests/test_cwd_safety.py` — drives the hook as a subprocess with
