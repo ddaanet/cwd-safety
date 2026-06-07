@@ -29,6 +29,7 @@ atexit.register(shutil.rmtree, _TMP, ignore_errors=True)
 PROJ = os.path.join(_TMP, "proj")        # a real project root
 WT = os.path.join(_TMP, "wt1")           # worktree root OUTSIDE proj (location-independent)
 WTSUB = os.path.join(WT, "src")          # a subdir inside the worktree
+WTDEEP = os.path.join(WT, "a", "b", "c") # a deeply nested subdir inside the worktree
 PROJSUB = os.path.join(PROJ, "subdir")   # ordinary subdir of the main tree
 OTHER = os.path.join(_TMP, "other")      # foreign repo: .git is a directory
 EVIL = os.path.join(_TMP, "evil")        # spoof: .git file whose gitdir is outside PROJ
@@ -37,6 +38,7 @@ BINGIT = os.path.join(_TMP, "bingit")    # dir whose .git is non-UTF-8 bytes
 os.makedirs(os.path.join(PROJ, ".git", "worktrees", "wt1"))
 os.makedirs(PROJSUB)
 os.makedirs(WTSUB)
+os.makedirs(WTDEEP)
 os.makedirs(os.path.join(OTHER, ".git"))
 os.makedirs(EVIL)
 os.makedirs(BINGIT)
@@ -144,6 +146,10 @@ check("wt: `cd PROJ` (leave via cd) blocked",
 check("wt: drift inside wt blocked", blocked("PreToolUse", WTSUB, "ls", root=PROJ))
 check("wt: drift-inside-wt restore hint names wt root",
       blocked_with("PreToolUse", WTSUB, "ls", WT, root=PROJ))
+check("wt: deep drift inside wt blocked, hint names wt root",
+      blocked_with("PreToolUse", WTDEEP, "ls", WT, root=PROJ))
+check("wt: `cd WT && cmd` from deep drift allowed",
+      allowed("PreToolUse", WTDEEP, f"cd {WT} && pytest", root=PROJ))
 
 # Main tree under the same PROJ root behaves normally
 check("main: `ls` at PROJ allowed", allowed("PreToolUse", PROJ, "ls", root=PROJ))
