@@ -32,16 +32,20 @@ WTSUB = os.path.join(WT, "src")          # a subdir inside the worktree
 PROJSUB = os.path.join(PROJ, "subdir")   # ordinary subdir of the main tree
 OTHER = os.path.join(_TMP, "other")      # foreign repo: .git is a directory
 EVIL = os.path.join(_TMP, "evil")        # spoof: .git file whose gitdir is outside PROJ
+BINGIT = os.path.join(_TMP, "bingit")    # dir whose .git is non-UTF-8 bytes
 
 os.makedirs(os.path.join(PROJ, ".git", "worktrees", "wt1"))
 os.makedirs(PROJSUB)
 os.makedirs(WTSUB)
 os.makedirs(os.path.join(OTHER, ".git"))
 os.makedirs(EVIL)
+os.makedirs(BINGIT)
 with open(os.path.join(WT, ".git"), "w") as _f:
     _f.write("gitdir: " + os.path.join(PROJ, ".git", "worktrees", "wt1") + "\n")
 with open(os.path.join(EVIL, ".git"), "w") as _f:
     _f.write("gitdir: " + os.path.join(_TMP, "elsewhere", ".git", "worktrees", "x") + "\n")
+with open(os.path.join(BINGIT, ".git"), "wb") as _f:
+    _f.write(b"\xff\xfe\x00 not utf-8")
 
 _fails = 0
 
@@ -149,6 +153,8 @@ check("main: ordinary drift at PROJ/subdir blocked", blocked("PreToolUse", PROJS
 check("guard: foreign repo (.git dir) treated as drift", blocked("PreToolUse", OTHER, "ls", root=PROJ))
 check("guard: spoofed .git file (gitdir outside PROJ) treated as drift",
       blocked("PreToolUse", EVIL, "ls", root=PROJ))
+check("guard: non-UTF-8 .git file treated as drift, not a crash",
+      blocked("PreToolUse", BINGIT, "ls", root=PROJ))
 
 # PostToolUse against the worktree effective root
 code, out, _err = run("PostToolUse", WT, "ls", root=PROJ)

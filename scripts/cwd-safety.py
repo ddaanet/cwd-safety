@@ -61,7 +61,7 @@ def _read_gitdir(dotgit_file: str) -> str:
     try:
         with open(dotgit_file, encoding="utf-8") as f:
             content = f.read()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return ""
     for line in content.splitlines():
         if line.startswith("gitdir:"):
@@ -69,6 +69,9 @@ def _read_gitdir(dotgit_file: str) -> str:
             if not path:
                 return ""
             if not os.path.isabs(path):
+                # Resolved but not normalized; git writes absolute gitdir paths
+                # in practice, so a non-normalized relative path simply won't
+                # match and the dir is treated as not-a-worktree (safe fallback).
                 path = os.path.join(os.path.dirname(dotgit_file), path)
             return path
     return ""
