@@ -6,8 +6,10 @@ git submodule) and then runs later commands from there, silently misleading
 itself about project context. Read-only commands from the wrong cwd actively
 mislead the agent. This hook makes the project root a hard boundary.
 
-PreToolUse(Bash) — decided against command ``C``, project root ``R``
-(``$CLAUDE_PROJECT_DIR``) and current cwd ``W`` (``cwd`` from hook stdin):
+PreToolUse(Bash) — decided against command ``C``, effective root ``R`` (the
+enclosing git-worktree root when ``cwd`` is inside a worktree of
+``$CLAUDE_PROJECT_DIR``, else ``$CLAUDE_PROJECT_DIR``) and current cwd ``W``
+(``cwd`` from hook stdin):
 
 1. ``W == R`` and ``C`` is not a ``cd`` command            → allow silently.
 2. ``C`` is the root-anchored form ``cd R`` or ``cd R && …``→ allow from any W
@@ -39,18 +41,85 @@ import sys
 _LEADING_CD = re.compile(r"^cd(?:\s|;|&|$)")
 
 
+def _is_under(path: str, parent: str) -> bool:
+    """True if ``path`` equals ``parent`` or sits inside it.
+
+    String containment only — no symlink/realpath resolution (the exact-match
+    principle of DESIGN.md decision (d) is preserved for the cd match; this is
+    only used to confirm a worktree's gitdir belongs to the project).
+    """
+    parent = parent.rstrip(os.sep)
+    return path == parent or path.startswith(parent + os.sep)
+
+
+def _read_gitdir(dotgit_file: str) -> str:
+    """Absolute gitdir path from a worktree ``.git`` file, or "".
+
+    A linked worktree's ``.git`` is a file containing ``gitdir: <path>``.
+    Relative paths are resolved against the file's directory.
+    """
+    try:
+        with open(dotgit_file, encoding="utf-8") as f:
+            content = f.read()
+    except OSError:
+        return ""
+    for line in content.splitlines():
+        if line.startswith("gitdir:"):
+            path = line[len("gitdir:"):].strip()
+            if not path:
+                return ""
+            if not os.path.isabs(path):
+                path = os.path.join(os.path.dirname(dotgit_file), path)
+            return path
+    return ""
+
+
+def _worktree_root(cwd: str, project_dir: str) -> str:
+    """Enclosing linked-worktree root if ``cwd`` is inside a git worktree of
+    ``project_dir``, else "".
+
+    Walks up from ``cwd``; the worktree root is the first ancestor whose
+    ``.git`` is a *file* whose ``gitdir:`` resolves under
+    ``project_dir/.git``. Stops at ``project_dir`` (the main working tree is
+    not a linked worktree) and at the filesystem root. A ``.git`` *directory*
+    (a nested main repo) is not a worktree. Filesystem reads only — no
+    subprocess. Returns "" on anything unrecognized so the caller falls back
+    to ``project_dir``.
+    """
+    if not cwd or not project_dir:
+        return ""
+    git_main = os.path.join(project_dir, ".git")
+    d = cwd
+    while True:
+        if d == project_dir:
+            return ""
+        dotgit = os.path.join(d, ".git")
+        if os.path.isfile(dotgit):
+            gitdir = _read_gitdir(dotgit)
+            if gitdir and _is_under(gitdir, git_main):
+                return d
+            return ""
+        if os.path.isdir(dotgit):
+            return ""
+        parent = os.path.dirname(d)
+        if parent == d:
+            return ""
+        d = parent
+
+
 def main() -> None:
     """Dispatch on hook event; the effective root is always allowed.
 
-    The effective root is the active worktree root when Claude Code reports
-    one (the ``worktree`` field in the hook payload), else ``$CLAUDE_PROJECT_DIR``.
+    The effective root is the enclosing git-worktree root when ``cwd`` is
+    inside a worktree of ``$CLAUDE_PROJECT_DIR`` (detected from the on-disk
+    ``.git`` linkage), else ``$CLAUDE_PROJECT_DIR``.
     """
     hook_input = json.load(sys.stdin)
 
     event_name = hook_input.get("hook_event_name", "")
     cwd = hook_input.get("cwd", "")
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-    worktree = hook_input.get("worktree") or ""  # absent / null / "" → no worktree
+    worktree = _worktree_root(cwd, project_dir)
     effective_root = worktree or project_dir
     in_worktree = bool(worktree)
 

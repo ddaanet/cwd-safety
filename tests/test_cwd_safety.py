@@ -8,33 +8,51 @@ Stdlib only — no pytest, no third-party deps.
 Run: python3 tests/test_cwd_safety.py   (exit 0 = all pass, 1 = failures)
 """
 
+import atexit
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 
-ROOT = "/project/root"  # the pretend $CLAUDE_PROJECT_DIR for these cases
+ROOT = "/project/root"  # pretend $CLAUDE_PROJECT_DIR for the non-worktree cases
 SUB = "/project/root/subdir"
-WT = "/home/user/wt-feature"   # an active worktree root (deliberately OUT of tree:
-WTSUB = WT + "/src"            # proves detection is field-based, not path-based)
-
-_UNSET = object()  # sentinel: distinguishes "omit worktree" from null/"" /path
 
 HOOK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts", "cwd-safety.py")
+
+# ── Real on-disk fixtures for filesystem worktree detection ─────────────────
+# Detection reads the `.git` linkage, so worktree cases need actual dirs/files.
+_TMP = tempfile.mkdtemp(prefix="cwdsafety-test-")
+atexit.register(shutil.rmtree, _TMP, ignore_errors=True)
+
+PROJ = os.path.join(_TMP, "proj")        # a real project root
+WT = os.path.join(_TMP, "wt1")           # worktree root OUTSIDE proj (location-independent)
+WTSUB = os.path.join(WT, "src")          # a subdir inside the worktree
+PROJSUB = os.path.join(PROJ, "subdir")   # ordinary subdir of the main tree
+OTHER = os.path.join(_TMP, "other")      # foreign repo: .git is a directory
+EVIL = os.path.join(_TMP, "evil")        # spoof: .git file whose gitdir is outside PROJ
+
+os.makedirs(os.path.join(PROJ, ".git", "worktrees", "wt1"))
+os.makedirs(PROJSUB)
+os.makedirs(WTSUB)
+os.makedirs(os.path.join(OTHER, ".git"))
+os.makedirs(EVIL)
+with open(os.path.join(WT, ".git"), "w") as _f:
+    _f.write("gitdir: " + os.path.join(PROJ, ".git", "worktrees", "wt1") + "\n")
+with open(os.path.join(EVIL, ".git"), "w") as _f:
+    _f.write("gitdir: " + os.path.join(_TMP, "elsewhere", ".git", "worktrees", "x") + "\n")
 
 _fails = 0
 
 
-def run(event, cwd, command="", worktree=_UNSET):
+def run(event, cwd, command="", root=ROOT):
     """Invoke the hook; return (exit_code, stdout, stderr).
 
-    worktree: _UNSET omits the key entirely; any other value (a path, "",
-    or None) is placed in the payload verbatim (None serializes to JSON null).
+    root sets $CLAUDE_PROJECT_DIR for the call (worktree fixtures pass PROJ).
     """
     payload = {"hook_event_name": event, "cwd": cwd, "tool_input": {"command": command}}
-    if worktree is not _UNSET:
-        payload["worktree"] = worktree
-    env = dict(os.environ, CLAUDE_PROJECT_DIR=ROOT)
+    env = dict(os.environ, CLAUDE_PROJECT_DIR=root)
     proc = subprocess.run(
         [sys.executable, HOOK],
         input=json.dumps(payload),
@@ -54,21 +72,21 @@ def check(label, cond):
         _fails += 1
 
 
-def allowed(event, cwd, command="", worktree=_UNSET):
+def allowed(event, cwd, command="", root=ROOT):
     """Assert: exit 0, nothing on stderr (silent allow)."""
-    code, _out, err = run(event, cwd, command, worktree)
+    code, _out, err = run(event, cwd, command, root)
     return code == 0 and err == ""
 
 
-def blocked(event, cwd, command, worktree=_UNSET):
+def blocked(event, cwd, command, root=ROOT):
     """Assert: exit 2, a message on stderr."""
-    code, _out, err = run(event, cwd, command, worktree)
+    code, _out, err = run(event, cwd, command, root)
     return code == 2 and err != ""
 
 
-def blocked_with(event, cwd, command, needle, worktree=_UNSET):
+def blocked_with(event, cwd, command, needle, root=ROOT):
     """Assert: exit 2 and `needle` appears in stderr."""
-    code, _out, err = run(event, cwd, command, worktree)
+    code, _out, err = run(event, cwd, command, root)
     return code == 2 and needle in err
 
 
@@ -112,32 +130,36 @@ check("PostToolUse drifted: emits warning JSON, exit 0", warned)
 check("unknown event: exit 0, silent", allowed("SessionStart", SUB, "anything"))
 
 
-# ── Worktree: active worktree root is the effective anchor ───────────────────
-check("wt active: `ls` at wt root allowed", allowed("PreToolUse", WT, "ls", worktree=WT))
-check("wt active: bare `cd WT` allowed", allowed("PreToolUse", WT, f"cd {WT}", worktree=WT))
-check("wt active: `cd WT && ls` allowed", allowed("PreToolUse", WT, f"cd {WT} && ls", worktree=WT))
-check("wt active: `cd subdir` blocked", blocked("PreToolUse", WT, "cd subdir", worktree=WT))
-check("wt active: `cd ROOT` (leave via cd) blocked",
-      blocked("PreToolUse", WT, f"cd {ROOT} && git merge", worktree=WT))
-check("wt active: drift inside wt blocked", blocked("PreToolUse", WTSUB, "ls", worktree=WT))
-check("wt active: cwd at main (not wt root) blocked",
-      blocked("PreToolUse", ROOT, "ls", worktree=WT))
+# ── Worktree (filesystem-detected): worktree root is the effective anchor ────
+check("wt: `ls` at wt root allowed", allowed("PreToolUse", WT, "ls", root=PROJ))
+check("wt: bare `cd WT` allowed", allowed("PreToolUse", WT, f"cd {WT}", root=PROJ))
+check("wt: `cd WT && ls` allowed", allowed("PreToolUse", WT, f"cd {WT} && ls", root=PROJ))
+check("wt: `cd subdir` blocked", blocked("PreToolUse", WT, "cd subdir", root=PROJ))
+check("wt: `cd PROJ` (leave via cd) blocked",
+      blocked("PreToolUse", WT, f"cd {PROJ} && git merge", root=PROJ))
+check("wt: drift inside wt blocked", blocked("PreToolUse", WTSUB, "ls", root=PROJ))
+check("wt: drift-inside-wt restore hint names wt root",
+      blocked_with("PreToolUse", WTSUB, "ls", WT, root=PROJ))
 
-# PostToolUse against the effective root
-code, out, _err = run("PostToolUse", WT, "ls", worktree=WT)
-check("wt active: PostToolUse at wt root silent", code == 0 and out == "")
+# Main tree under the same PROJ root behaves normally
+check("main: `ls` at PROJ allowed", allowed("PreToolUse", PROJ, "ls", root=PROJ))
+check("main: ordinary drift at PROJ/subdir blocked", blocked("PreToolUse", PROJSUB, "ls", root=PROJ))
 
-code, out, _err = run("PostToolUse", WTSUB, "ls", worktree=WT)
+# Detection guards: foreign repo and spoofed .git file are NOT worktrees of PROJ
+check("guard: foreign repo (.git dir) treated as drift", blocked("PreToolUse", OTHER, "ls", root=PROJ))
+check("guard: spoofed .git file (gitdir outside PROJ) treated as drift",
+      blocked("PreToolUse", EVIL, "ls", root=PROJ))
+
+# PostToolUse against the worktree effective root
+code, out, _err = run("PostToolUse", WT, "ls", root=PROJ)
+check("wt: PostToolUse at wt root silent", code == 0 and out == "")
+
+code, out, _err = run("PostToolUse", WTSUB, "ls", root=PROJ)
 wt_warned = code == 0 and "additionalContext" in out
 if wt_warned:
     parsed = json.loads(out)
     wt_warned = WTSUB in parsed["hookSpecificOutput"]["additionalContext"]
-check("wt active: PostToolUse drift inside wt warns", wt_warned)
-
-# ── Fallback: absent / null / empty worktree behaves exactly like no worktree ─
-check("worktree null: `ls` at ROOT allowed", allowed("PreToolUse", ROOT, "ls", worktree=None))
-check("worktree empty: `ls` at ROOT allowed", allowed("PreToolUse", ROOT, "ls", worktree=""))
-check("worktree null: drift at SUB blocked", blocked("PreToolUse", SUB, "ls", worktree=None))
+check("wt: PostToolUse drift inside wt warns", wt_warned)
 
 
 if _fails:
