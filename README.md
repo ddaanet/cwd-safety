@@ -17,21 +17,34 @@ class of confusion can't start.
 ## How it works
 
 A single Python hook (`scripts/cwd-safety.py`) fires on **`PreToolUse`**
-and **`PostToolUse`** for the **Bash** tool. With project root `R`
-(`$CLAUDE_PROJECT_DIR`) and the command's current working directory `W`:
+and **`PostToolUse`** for the **Bash** tool. It enforces against the
+**effective root `E`** — normally `$CLAUDE_PROJECT_DIR`, but the enclosing
+git-worktree root when the command's cwd is inside a worktree of the
+project (see *Worktrees* below). With effective root `E` and the command's
+current working directory `W`:
 
 | Situation | Decision |
 |-----------|----------|
-| At root (`W == R`), command isn't a `cd` | **allow** silently |
-| `cd R` or `cd R && <cmd>` (root-anchored) | **allow** from anywhere |
+| At root (`W == E`), command isn't a `cd` | **allow** silently |
+| `cd E` or `cd E && <cmd>` (root-anchored) | **allow** from anywhere |
 | Any other leading `cd` (`cd subdir`, `cd ..`, `cd -`) | **block** — even at root |
-| Drifted (`W != R`), any other command | **block**, with the restore command |
-| `PostToolUse` and drifted (`W != R`) | **warn** (agent + user channels) |
+| Drifted (`W != E`), any other command | **block**, with the restore command |
+| `PostToolUse` and drifted (`W != E`) | **warn** (agent + user channels) |
 
 The pre-use side stops drift *before* it happens — a bare `cd <subdir>`
 is the most common cause, so it's refused outright, even from root. The
 post-use side is a backstop that warns after drift the pre-use gate can't
 intercept (e.g. `pushd`).
+
+### Worktrees
+
+When the agent works inside a git worktree of the project, that worktree's
+root becomes the effective root `E` — the guard anchors there instead of
+`$CLAUDE_PROJECT_DIR`, so a worktree is a first-class working directory
+rather than drift. The worktree root is detected from the on-disk `.git`
+linkage (read-only); there is no configuration. To *leave* a worktree, use
+the `ExitWorktree` tool — not `cd`, which the guard blocks (including `cd
+$CLAUDE_PROJECT_DIR`) to prevent silent drift out of the worktree.
 
 ### Running a command from somewhere other than root
 
@@ -42,7 +55,7 @@ intercept (e.g. `pushd`).
   it's allowed.
 - **Restore after drift:** `cd /path/to/root`.
 
-Path matching is exact — the `cd` target must equal `$CLAUDE_PROJECT_DIR`
+Path matching is exact — the `cd` target must equal the effective root
 literally (no normalization, no prefix matching). Only `&&` is accepted
 after a root-anchored `cd`; `;` and `||` are not.
 
@@ -63,10 +76,11 @@ written — disabling the plugin removes the hook with it.
 
 - `pushd`/`popd` aren't intercepted at PreToolUse (only `cd`); they're
   caught after the fact by the PostToolUse warning.
-- A contrived `cd R && cd subdir && <cmd>` passes the pre-use gate and
+- A contrived `cd E && cd subdir && <cmd>` passes the pre-use gate and
   drifts; the PostToolUse warning is the backstop.
-- Single root only — keyed to one `$CLAUDE_PROJECT_DIR`. Multi-root /
-  nested-worktree setups enforce just that one root.
+- One effective root at a time — either `$CLAUDE_PROJECT_DIR` or the
+  enclosing worktree of it. Worktrees are recognized; unrelated repos and
+  arbitrary multi-root setups are not.
 
 See `DESIGN.md` for the full requirements, decisions, and history.
 
