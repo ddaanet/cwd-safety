@@ -27,14 +27,18 @@ current working directory `W`:
 |-----------|----------|
 | At root (`W == E`), command isn't a `cd` | **allow** silently |
 | `cd E` or `cd E && <cmd>` (root-anchored) | **allow** from anywhere |
-| Any other leading `cd` (`cd subdir`, `cd ..`, `cd -`) | **block** — even at root |
+| At root (`W == E`), `cd <subdir> && <cmd>` | **rewrite** to a subshell `(cd <subdir> && <cmd>)`, then allow |
+| Any other leading `cd` (bare `cd subdir`, `cd ..`, `cd -`, `;`/`\|\|` tails) | **block** — even at root |
 | Drifted (`W != E`), any other command | **block**, with the restore command |
 | `PostToolUse` and drifted (`W != E`) | **warn** (agent + user channels) |
 
 The pre-use side stops drift *before* it happens — a bare `cd <subdir>`
-is the most common cause, so it's refused outright, even from root. The
-post-use side is a backstop that warns after drift the pre-use gate can't
-intercept (e.g. `pushd`).
+is the most common cause, so it's refused outright, even from root. The one
+ergonomic exception is at root: a `cd <subdir> && <cmd>` is rewritten in
+place to a non-persisting subshell `(cd <subdir> && <cmd>)` and allowed
+(announced on both channels), sparing the agent a block-then-reissue turn
+without letting cwd move. The post-use side is a backstop that warns after
+drift the pre-use gate can't intercept (e.g. `pushd`).
 
 ### Worktrees
 
@@ -52,7 +56,8 @@ $CLAUDE_PROJECT_DIR`) to prevent silent drift out of the worktree.
   `&&` guarantees the command runs only if the `cd` succeeds.
 - **Touch a subdirectory without drifting:** use a subshell,
   `(cd subdir && <command>)` — the directory change doesn't persist, so
-  it's allowed.
+  it's allowed. At root, a bare `cd subdir && <command>` is rewritten
+  into this subshell form automatically.
 - **Restore after drift:** `cd /path/to/root`.
 
 Path matching is exact — the `cd` target must equal the effective root
