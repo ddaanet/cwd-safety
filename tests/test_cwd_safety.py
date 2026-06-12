@@ -96,6 +96,33 @@ def blocked_with(event, cwd, command, needle, root=ROOT):
     return code == 2 and needle in err
 
 
+def rewritten(event, cwd, command, expected_cmd, root=ROOT):
+    """Assert: a PreToolUse input rewrite.
+
+    Exit 0, empty stderr, and an allow-decision JSON on stdout whose
+    `updatedInput.command` equals `expected_cmd`. The rewrite is announced on
+    both channels (agent: `additionalContext`, user: `systemMessage`), but the
+    command itself is NOT echoed to the user — Claude Code already surfaces the
+    rewritten command, so re-echoing it is bloat.
+    """
+    code, out, err = run(event, cwd, command, root)
+    if code != 0 or err != "" or not out:
+        return False
+    try:
+        parsed = json.loads(out)
+    except json.JSONDecodeError:
+        return False
+    hso = parsed.get("hookSpecificOutput", {})
+    sysmsg = parsed.get("systemMessage", "")
+    return (
+        hso.get("permissionDecision") == "allow"
+        and hso.get("updatedInput", {}).get("command") == expected_cmd
+        and bool(hso.get("additionalContext"))  # agent is told cwd did not persist
+        and bool(sysmsg)                         # user is notified
+        and expected_cmd not in sysmsg           # but the command is not echoed to the user
+    )
+
+
 # ── Rule 1: at root, non-cd commands pass silently ──────────────────────────
 check("at root: `ls` allowed", allowed("PreToolUse", ROOT, "ls -la"))
 check("at root: pipeline allowed", allowed("PreToolUse", ROOT, "git status | head"))
@@ -116,6 +143,38 @@ check("at root: `cd /tmp` blocked", blocked("PreToolUse", ROOT, "cd /tmp"))
 check("at root: `cd -` blocked", blocked("PreToolUse", ROOT, "cd -"))
 check("`cd ROOT; ls` blocked (only && allowed)", blocked("PreToolUse", ROOT, f"cd {ROOT}; ls"))
 check("`cd ROOT || ls` blocked (only && allowed)", blocked("PreToolUse", ROOT, f"cd {ROOT} || ls"))
+
+# ── Rule 3a: at root, `cd <subdir> && <cmd>` is rewritten to a non-persisting
+#    subshell instead of blocked — saves the agent a turn, keeps cwd at root ──
+check("at root: `cd subdir && ls` rewritten to subshell",
+      rewritten("PreToolUse", ROOT, "cd subdir && ls", "(cd subdir && ls)"))
+check("at root: `cd ../sib && make` rewritten to subshell",
+      rewritten("PreToolUse", ROOT, "cd ../sib && make", "(cd ../sib && make)"))
+check("at root: `cd /tmp && cmd` rewritten to subshell",
+      rewritten("PreToolUse", ROOT, "cd /tmp && cmd", "(cd /tmp && cmd)"))
+check("at root: multi-`&&` tail wrapped whole",
+      rewritten("PreToolUse", ROOT, "cd a && b && c", "(cd a && b && c)"))
+check("at root: `cd dir&&ls` (no spaces around &&) rewritten",
+      rewritten("PreToolUse", ROOT, "cd dir&&ls", "(cd dir&&ls)"))
+# Directory names with spaces: quoted or backslash-escaped
+check('at root: `cd "my dir" && ls` (double-quoted, spaced) rewritten',
+      rewritten("PreToolUse", ROOT, 'cd "my dir" && ls', '(cd "my dir" && ls)'))
+check("at root: `cd 'my dir' && ls` (single-quoted, spaced) rewritten",
+      rewritten("PreToolUse", ROOT, "cd 'my dir' && ls", "(cd 'my dir' && ls)"))
+check("at root: `cd my\\ dir && ls` (escaped space) rewritten",
+      rewritten("PreToolUse", ROOT, "cd my\\ dir && ls", "(cd my\\ dir && ls)"))
+check("at root: `cd a b && ls` (two barewords, invalid cd) blocked",
+      blocked("PreToolUse", ROOT, "cd a b && ls"))
+check("at root: `cd subdir` (no &&) still blocked, not rewritten",
+      blocked("PreToolUse", ROOT, "cd subdir"))
+check("at root: `cd subdir; ls` not rewritten (only && wrappable)",
+      blocked("PreToolUse", ROOT, "cd subdir; ls"))
+check("at root: `cd subdir || ls` not rewritten",
+      blocked("PreToolUse", ROOT, "cd subdir || ls"))
+check("at root: bare `cd && ls` (no path) still blocked",
+      blocked("PreToolUse", ROOT, "cd && ls"))
+check("drifted: `cd deeper && ls` blocked, not rewritten (restore first)",
+      blocked("PreToolUse", SUB, "cd deeper && ls"))
 
 # ── Rule 4: from a drifted cwd, other commands are blocked ──────────────────
 check("drifted: `ls` blocked", blocked("PreToolUse", SUB, "ls"))
@@ -150,6 +209,8 @@ check("wt: deep drift inside wt blocked, hint names wt root",
       blocked_with("PreToolUse", WTDEEP, "ls", WT, root=PROJ))
 check("wt: `cd WT && cmd` from deep drift allowed",
       allowed("PreToolUse", WTDEEP, f"cd {WT} && pytest", root=PROJ))
+check("wt: at wt root, `cd src && ls` rewritten to subshell",
+      rewritten("PreToolUse", WT, "cd src && ls", "(cd src && ls)", root=PROJ))
 
 # Main tree under the same PROJ root behaves normally
 check("main: `ls` at PROJ allowed", allowed("PreToolUse", PROJ, "ls", root=PROJ))

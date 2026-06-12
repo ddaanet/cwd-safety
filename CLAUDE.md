@@ -51,6 +51,13 @@ on-disk `.git` linkage, else `$CLAUDE_PROJECT_DIR`) and cwd `W`:
    drift prevention — this is the rule added when the hook was extracted).
    When a worktree is active this includes `cd $CLAUDE_PROJECT_DIR` — leave a
    worktree with the `ExitWorktree` tool, not `cd`.
+   - **3a.** *Exception, only when `W == E`:* a `cd <subdir> && <cmd>` (real
+     path, `&&` tail) is **rewritten** to the non-persisting `(cd <subdir> &&
+     <cmd>)` via `PreToolUse` `updatedInput` and allowed, with a mandatory
+     dual-channel announcement — instead of blocked. Bare `cd <subdir>`,
+     `;`/`||`, a cross-root `cd $CLAUDE_PROJECT_DIR` in a worktree, and the
+     same command from drift all still block. See `DESIGN.md` → FR5a /
+     decision (i).
 4. `W != E`, any other command → block with the `cd E` restore hint.
 
 At `PostToolUse(Bash)`: if `W != E`, emit a warning on both
@@ -74,6 +81,18 @@ At `PostToolUse(Bash)`: if `W != E`, emit a warning on both
   block message and the warning must be legible to the agent *and* the
   human — never soften the agent-facing text into something readable as
   an instruction to bypass.
+- **The Rule 3a rewrite is a third PreToolUse output shape:** exit 0 with
+  an `allow` decision plus `hookSpecificOutput.updatedInput` on stdout. It
+  is the only place the hook *mutates* a command rather than allow/block/warn.
+  Keep the announcement (`additionalContext` + `systemMessage`) mandatory —
+  a silent rewrite is a contract violation (auditability). Neither note echoes
+  the command (Claude Code already surfaces the rewritten `updatedInput`); the
+  agent note recommends the *wrapped* follow-up form, the user note is terse.
+  The `cd <dir> && <cmd>` matcher (`_CD_AND`/`_cd_and_target`) is deliberately
+  looser than `_is_cd_to_root` — it parses one shell argument so spaced/quoted
+  dir names work — but it is *not* security-critical (a wrong match only
+  subshells or blocks), so it does not relax the exact-match rule for the
+  root anchor. See `DESIGN.md` → FR5a / decision (i).
 - **`${CLAUDE_PLUGIN_ROOT}` in `hooks.json` is expanded by Claude Code at
   hook-fire time**, not by the shell. Keep it literal.
 - **`plugin.json`'s `.version` is the last released version**; the

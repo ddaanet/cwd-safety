@@ -7,10 +7,12 @@ this plugin. Updated as the design evolves.
 directory at project root. It fires a single Python hook
 (`scripts/cwd-safety.py`) on both `PreToolUse(Bash)` and
 `PostToolUse(Bash)`. The pre-use side blocks any command that would cause or
-exploit cwd drift before it runs; the post-use side warns after drift is
-detected (a backstop for cases the pre-use gate cannot intercept). Together
-they enforce a hard boundary: the agent executes Bash from project root or not
-at all.
+exploit cwd drift before it runs — or, for the single ergonomic case of a
+`cd <subdir> && <cmd>` issued from root, rewrites it in place to a
+non-persisting subshell rather than blocking; the post-use side warns after
+drift is detected (a backstop for cases the pre-use gate cannot intercept).
+Together they enforce a hard boundary: the agent executes Bash from project
+root or not at all.
 
 ## Functional Requirements
 
@@ -42,6 +44,28 @@ non-persisting subshell `(cd subdir && <command>)`. When a worktree is active,
 this includes a `cd` back to `$CLAUDE_PROJECT_DIR`: leaving a worktree is done
 with the `ExitWorktree` tool, not a raw `cd`. The block message is
 worktree-aware and names `ExitWorktree`.
+
+**FR5a (subshell rewrite).** On `PreToolUse`, when `W == E`: a command of the
+form `cd <dir> && <rest>` — a leading `cd` to a single directory argument joined
+by `&&` to a non-empty tail, not satisfying FR4 — is **not** blocked. Instead the
+hook returns `permissionDecision: "allow"` with `hookSpecificOutput.updatedInput`
+replacing the command with `(cd <dir> && <rest>)`, scoping the directory change
+to a non-persisting subshell so cwd stays at `E` by construction. The `<dir>`
+argument may contain spaces when double-quoted, single-quoted, or
+backslash-escaped. The rewrite is announced on both channels — never silent — but
+**neither note echoes the command** (Claude Code already surfaces the rewritten
+`updatedInput`, so re-echoing is bloat): `additionalContext` tells the agent cwd
+did not persist and recommends the *wrapped* `(cd <dir> && <command>)` form for
+follow-ups (recommending the unwrapped form would only re-trigger the rewrite);
+`systemMessage` is a terse "wrapped command in a subshell". Exclusions, all of
+which fall through to the FR5 block: a bare `cd <dir>` with no `&&` tail; a
+pathless `cd && …`; two-bareword `cd a b && …` (not a single directory
+argument); the `;` and `||` separators; and — when a worktree is active — a `cd`
+to `$CLAUDE_PROJECT_DIR` (a cross-root transition governed by `ExitWorktree`, not
+a subdir descent; the target is compared de-quoted so a quoted/spaced main-root
+path is excluded too). From a drifted cwd (`W != E`) the same `cd <dir> && <rest>`
+is still blocked (FR6): the agent must restore `E` first, since a subshell from
+the wrong cwd would run the tail from the wrong cwd.
 
 **FR6 (drift block).** On `PreToolUse`: if `W != E` and the command is not
 the root-anchored form (FR4) and does not trigger FR5, the hook blocks with
@@ -255,6 +279,68 @@ and relocated worktrees defeat it. (3) Accept both `R` and the worktree root —
 rejected; `ExitWorktree` makes exit-then-merge the clean path. (4) Have the hook
 set the Bash cwd — impossible; hook output cannot redirect the tool's cwd.
 
+### (i) Rewrite `cd <subdir> && <cmd>` to a subshell instead of blocking
+
+**Decision:** At the effective root, a `cd <path> && <rest>` command is rewritten
+in place to the non-persisting subshell `(cd <path> && <rest>)` via a
+`PreToolUse` `updatedInput`, rather than blocked (FR5a). Bare `cd <path>`, the
+`;`/`||` separators, a cross-root `cd` to `$CLAUDE_PROJECT_DIR` while in a
+worktree, and the same command from a drifted cwd all remain blocked.
+
+**Rationale:** Under decision (b) a `cd subdir && cmd` was blocked, and the block
+message offered `(cd subdir && cmd)` as the sanctioned alternative — so the agent
+spent a turn reading the block and reissuing the exact form the hook already knew
+it wanted. `PreToolUse` hooks can rewrite the tool input
+(`hookSpecificOutput.updatedInput`), so the hook can produce that form directly
+and save the turn. Crucially this is **free on the security axis**: a subshell
+cannot mutate the parent shell's cwd, so the no-persistence invariant that the
+whole plugin enforces holds by construction — exactly as it would after the block
++ reissue. This is *not* the security-vs-ergonomics trade that decision (d)
+rejected (normalization, which would weaken the exact-match guarantee); it is
+ergonomics at no security cost.
+
+The genuine cost is a different one: this is the first behavior that **mutates**
+the agent's command rather than only allowing, blocking, or warning. Mutation
+touches auditability (the executed command differs from what the transcript shows
+the agent wrote) and least-surprise. That cost is paid down by making the rewrite
+**never silent** — `additionalContext` (agent) and `systemMessage` (user) both
+fire, so neither party is blind to the substitution and a follow-up command that
+assumed persistence is corrected by context rather than by a confusing wrong-cwd
+result. Neither note re-echoes the command: Claude Code already surfaces the
+rewritten `updatedInput`, so the agent note instead states cwd did not persist and
+recommends the *wrapped* `(cd <dir> && <command>)` form for follow-ups — pointing
+at the unwrapped form would just trigger another rewrite and another
+notification — and the user note is a terse one-liner.
+
+The rewrite is deliberately narrow. It fires only from `W == E` (from drift, the
+only sanctioned command is the `cd E` restore; a subshell from the wrong cwd
+would run the tail from the wrong cwd). It requires a single directory argument
+and an `&&` tail, so bare `cd subdir` — the persistent-drift *intent* — still hits
+the FR5 block and still teaches. The directory may carry spaces when quoted or
+backslash-escaped (a verbose `_CD_AND` regex matches one shell argument: a
+"double"/'single'-quoted string or a bareword of plain chars and `\`-escapes), so
+real-world paths like `cd "my dir" && …` are not needlessly blocked; this is
+non-security-critical sugar — a wrong match merely subshells (still no-persist) or
+blocks (agent reissues), so the looser parsing here does not touch the
+exact-match security matcher `_is_cd_to_root` (decision (d)), which is untouched.
+It excludes `;`/`||` for the same reason FR4 does (decision (c)). And while a
+worktree is active it excludes `cd $CLAUDE_PROJECT_DIR`: that is a transition
+between the two managed roots, governed by `ExitWorktree` (decision (h), "no
+single Bash call legitimately needs both roots"), not a subdir descent —
+subshelling it would back-door exactly the cross-root operation decision (h)
+forbids. The exclusion compares the *de-quoted* target to `$CLAUDE_PROJECT_DIR`,
+so a quoted or escaped main-root path is caught just like a bare one.
+
+**Alternatives considered:** (1) Keep blocking and rely on the agent to reissue —
+rejected, it wastes a turn for no safety gain now that `updatedInput` exists. (2)
+Rewrite silently — rejected on auditability/least-surprise grounds; the dual-
+channel announcement is mandatory. (3) Also rewrite `cd <subdir>; <cmd>` /
+`|| <cmd>` and bare `cd <subdir>` — rejected: `;`/`||` break the cd-first
+invariant the project rejects everywhere else, and a bare `cd` has no tail to
+scope, so wrapping it (`(cd subdir)`) is a no-op that would suppress the teaching
+block. (4) Rewrite from a drifted cwd too — rejected: it would run the tail from
+the wrong directory; restore must come first.
+
 ## Limitations
 
 - **`pushd`/`popd` are not intercepted.** The `_LEADING_CD` regex only matches
@@ -334,3 +420,12 @@ on-disk `.git` linkage (there is no worktree hook-payload field — verified
 empirically), falling back to `$CLAUDE_PROJECT_DIR` otherwise. `cd` back to
 main while a worktree is active is blocked in favor of `ExitWorktree`; block and
 warn messages are worktree-aware. See decision (h).
+
+**2026-06-12 — rewrite `cd <subdir> && <cmd>` to a subshell** (this repo).
+`PreToolUse` `updatedInput` is used to rewrite a `cd <path> && <rest>` issued
+from the effective root into the non-persisting `(cd <path> && <rest>)`, rather
+than blocking and making the agent reissue it (FR5a). Free on the security axis
+(the subshell preserves the no-persistence invariant); the cost is command
+mutation, paid down by a mandatory dual-channel announcement. Narrowly scoped:
+fires only from `W == E`, requires an `&&` tail and a path, excludes `;`/`||`
+and (in a worktree) a cross-root `cd $CLAUDE_PROJECT_DIR`. See decision (i).
