@@ -43,10 +43,13 @@ and runs the test suite. Must be green before committing.
 Canonical statement lives in `DESIGN.md` (FR1–FR9). In short, at
 `PreToolUse(Bash)` with **effective root `E`** (the enclosing git-worktree root
 when `cwd` is inside a worktree of `$CLAUDE_PROJECT_DIR`, detected from the
-on-disk `.git` linkage, else `$CLAUDE_PROJECT_DIR`) and cwd `W`:
+on-disk `.git` linkage; **or `$CLAUDE_PROJECT_DIR` itself when it is a linked
+worktree** — a background worktree session, main root derived from the `.git`
+linkage; else `$CLAUDE_PROJECT_DIR`) and cwd `W`:
 
 1. `W == E` and `C` is not a `cd` → allow silently.
 2. `cd E` / `cd E && <rest>` (exact-path, `&&`-only) → allow from any `W`.
+   Redirections may sit between the path and the `&&` (`cd E 2>&1 && <rest>`).
 3. Any other leading `cd` → **block, even when `W == E`** (proactive
    drift prevention — this is the rule added when the hook was extracted).
    When a worktree is active this includes `cd $CLAUDE_PROJECT_DIR` — leave a
@@ -58,6 +61,12 @@ on-disk `.git` linkage, else `$CLAUDE_PROJECT_DIR`) and cwd `W`:
      `;`/`||`, a cross-root `cd $CLAUDE_PROJECT_DIR` in a worktree, and the
      same command from drift all still block. See `DESIGN.md` → FR5a /
      decision (i).
+   - **3b.** *Also when `W == E`:* a non-leading `cd` that runs in the current
+     shell right after a top-level separator (`mkdir … && cd sub && …`,
+     `echo x; cd sub`) is **blocked** (FR5b). The `cd` must immediately follow the
+     separator, so `(cd sub && …)` subshells and `foo | cd sub` pipelines are not
+     caught; a quoted `"&& cd"` literal is a known, block-only false positive. See
+     `DESIGN.md` → FR5b / decision (j).
 4. `W != E`, any other command → block with the `cd E` restore hint.
 
 At `PostToolUse(Bash)`: if `W != E`, emit a warning on both

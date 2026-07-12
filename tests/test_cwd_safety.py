@@ -252,6 +252,63 @@ _c, _o, err_nonwt = run("PreToolUse", ROOT, "cd subdir")
 check("no wt: cd-block message omits ExitWorktree", "ExitWorktree" not in err_nonwt)
 
 
+# ── FR: redirections between the cd target and `&&` are tolerated ────────────
+# A redirection (2>&1, >f, 2>/dev/null …) does not change the cd-first `&&`
+# semantics, so the root-anchored allow and the subshell rewrite must see past it.
+check("redir: `cd ROOT 2>&1 && ls` allowed at root",
+      allowed("PreToolUse", ROOT, f"cd {ROOT} 2>&1 && ls"))
+check("redir: bare `cd ROOT 2>&1` allowed at root",
+      allowed("PreToolUse", ROOT, f"cd {ROOT} 2>&1"))
+check("redir: `cd ROOT >o 2>&1 && ls` (two redirs) allowed",
+      allowed("PreToolUse", ROOT, f"cd {ROOT} >o 2>&1 && ls"))
+check("redir: `cd ROOT 2>&1 && cmd` restores from drift",
+      allowed("PreToolUse", SUB, f"cd {ROOT} 2>&1 && pytest"))
+check("redir: at root `cd subdir 2>&1 && ls` rewritten to subshell",
+      rewritten("PreToolUse", ROOT, "cd subdir 2>&1 && ls", "(cd subdir 2>&1 && ls)"))
+check("redir: at root `cd subdir >out.txt && ls` rewritten to subshell",
+      rewritten("PreToolUse", ROOT, "cd subdir >out.txt && ls", "(cd subdir >out.txt && ls)"))
+# Guardrail: the separator must still be `&&` — a redirect does not license `;`/newline.
+check("redir: `cd ROOT 2>&1; ls` still blocked (only && allowed)",
+      blocked("PreToolUse", ROOT, f"cd {ROOT} 2>&1; ls"))
+check("redir: `cd subdir 2>&1; ls` still blocked, not rewritten",
+      blocked("PreToolUse", ROOT, "cd subdir 2>&1; ls"))
+
+# ── FR: embedded `cd` after a top-level separator is blocked (narrow) ────────
+# `mkdir … && cd sub && …` drifts even though `cd` is not the leading token.
+check("embedded: `mkdir -p t && cd t && ls` blocked at root",
+      blocked("PreToolUse", ROOT, "mkdir -p t && cd t && ls"))
+check("embedded: `echo hi; cd sub` blocked at root",
+      blocked("PreToolUse", ROOT, "echo hi; cd sub"))
+check("embedded: newline-joined `pwd\\ncd sub` blocked at root",
+      blocked("PreToolUse", ROOT, "pwd\ncd sub"))
+check("embedded: block message offers the subshell form",
+      blocked_with("PreToolUse", ROOT, "mkdir -p t && cd t && ls", "(cd subdir && <command>)"))
+# The subshell form we recommend everywhere must NOT be caught (paren before cd).
+check("embedded: `mkdir x && (cd x && ls)` subshell allowed",
+      allowed("PreToolUse", ROOT, "mkdir x && (cd x && ls)"))
+check("embedded: `foo | cd x` (pipe subshell) allowed",
+      allowed("PreToolUse", ROOT, "foo | cd x"))
+# Known, accepted false positive: a quoted literal containing `&& cd` blocks.
+check("embedded: quoted `&& cd` literal blocks (documented false positive)",
+      blocked("PreToolUse", ROOT, 'echo "x && cd y"'))
+
+# ── FR: $CLAUDE_PROJECT_DIR is itself a linked worktree ──────────────────────
+# The self-destruct case from session 5935efe7: CPD == the worktree path. The
+# hook must recognize the worktree (from its own .git linkage) so a `cd` to the
+# main repo is a governed cross-root move (ExitWorktree), not a subdir rewrite.
+check("cpd-wt: `ls` at CPD=worktree allowed", allowed("PreToolUse", WT, "ls", root=WT))
+check("cpd-wt: `cd src && ls` rewritten to subshell",
+      rewritten("PreToolUse", WT, "cd src && ls", "(cd src && ls)", root=WT))
+check("cpd-wt: `cd MAIN && git worktree remove` BLOCKED (not subshelled)",
+      blocked("PreToolUse", WT, f"cd {PROJ} && git worktree remove .claude/worktrees/wt1", root=WT))
+check("cpd-wt: cross-root block names ExitWorktree",
+      blocked_with("PreToolUse", WT, f"cd {PROJ} && git worktree remove x", "ExitWorktree", root=WT))
+check("cpd-wt: session command `cd MAIN && git worktree remove --force x 2>&1` blocked",
+      blocked("PreToolUse", WT, f"cd {PROJ} && git worktree remove --force x 2>&1", root=WT))
+check("cpd-wt: drift inside CPD=worktree blocked, message says 'worktree'",
+      blocked_with("PreToolUse", WTSUB, "ls", "worktree", root=WT))
+
+
 if _fails:
     print(f"\n{_fails} test(s) failed")
     sys.exit(1)

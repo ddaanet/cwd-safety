@@ -40,6 +40,25 @@ import sys
 # `cdfoo` does not match (cd must be followed by whitespace, end, or a separator).
 _LEADING_CD = re.compile(r"^cd(?:\s|;|&|$)")
 
+# One shell redirection clause that may follow the `cd` target before the `&&`:
+# `2>&1`, `>f`, `2>>f`, `<f`, `&>f`, `2>/dev/null`, … A redirection does not change
+# the cd-first `&&` semantics, so the root-anchored allow and the subshell rewrite
+# must see past it. Each alternative is either an fd-dup (no filename) or a filename
+# token that excludes `& | ; < > ( )` — so nothing here can swallow the `&&`
+# separator or smuggle in a second command. `_REDIRS` is zero or more such clauses,
+# whitespace-separated. Compact (no literal spaces) so it embeds in both the plain
+# and the VERBOSE matcher below.
+_REDIR = r"(?:&>>?\s*[^\s&|;<>()]+|\d*(?:>>|>|<)\s*[^\s&|;<>()]+|\d*[<>]&\d*)"
+_REDIRS = rf"(?:\s+{_REDIR})*"
+
+# An embedded `cd` that runs in the current shell right after a top-level
+# sequencing operator — `mkdir … && cd sub && …`, `echo x; cd sub`. The `cd`
+# must *immediately* follow the separator, so a `(cd sub && …)` subshell (a paren
+# sits before the `cd`) and a `foo | cd sub` pipeline (single `|`, not matched) are
+# never caught. This is a narrow drift detector, not a parser: a quoted literal
+# containing `&& cd` is a known, accepted false positive (it only causes a block).
+_EMBEDDED_CD = re.compile(r"(?:&&|\|\||;|&|\n)\s*cd(?:\s|;|&|$)")
+
 # `cd <dir> && <rest>`: a leading `cd` to a single directory argument, joined by
 # `&&` to a non-empty tail. The directory may contain spaces when quoted or
 # backslash-escaped, so the argument is matched as one of: a "double-quoted"
@@ -47,13 +66,14 @@ _LEADING_CD = re.compile(r"^cd(?:\s|;|&|$)")
 # Bare `cd` / `cd && …` (no directory) and the `;`/`||` separators do not match —
 # only `&&` preserves the cd-first invariant (see DESIGN decision (c)).
 _CD_AND = re.compile(
-    r"""
+    rf"""
     ^cd\s+                              # the `cd` builtin and its argument separator
     (                                   # (1) the target directory — one argument:
         "[^"]*"                         #   a "double-quoted" path (may contain spaces)
       | '[^']*'                         #   a 'single-quoted' path (may contain spaces)
       | (?: [^\s'"|&;()<>\\] | \\. )+   #   a bareword: plain chars or `\`-escapes (e.g. `\ `)
     )
+    {_REDIRS}                           # optional redirections on the `cd` (`2>&1`, `>f`, …)
     \s*&&\s*                            # the `&&` separator — only `&&`, never `;`/`||`
     \S                                 # a non-empty tail to run inside the subshell
     """,
@@ -130,6 +150,25 @@ def _worktree_root(cwd: str, project_dir: str) -> str:
         d = parent
 
 
+def _worktree_main_root(project_dir: str) -> str:
+    """Main repo root if ``project_dir`` is *itself* a linked worktree, else "".
+
+    Some sessions (notably background worktree sessions) set
+    ``$CLAUDE_PROJECT_DIR`` to the worktree path itself. Then ``_worktree_root``
+    finds nothing (``cwd`` never sits *under a different* project dir), and
+    without this the hook cannot tell it is in a worktree — so it would wrongly
+    subshell a ``cd`` to the main repo (which let a session delete its own
+    worktree, see DESIGN history). A linked worktree's ``.git`` is a file
+    ``gitdir: <main>/.git/worktrees/<name>``; the main root is the path before
+    ``/.git/worktrees/``. Exact string slice, no normalization — same sharp edge
+    as decision (d). Read-only filesystem access, no subprocess.
+    """
+    gitdir = _read_gitdir(os.path.join(project_dir, ".git")) if project_dir else ""
+    marker = os.sep + ".git" + os.sep + "worktrees" + os.sep
+    idx = gitdir.find(marker)
+    return gitdir[:idx] if (gitdir and idx != -1) else ""
+
+
 def main() -> None:
     """Dispatch on hook event; the effective root is always allowed.
 
@@ -142,12 +181,23 @@ def main() -> None:
     event_name = hook_input.get("hook_event_name", "")
     cwd = hook_input.get("cwd", "")
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+
+    # Two worktree shapes yield an effective root, an in-worktree flag, and the
+    # *main* repo root that a `cd` must not cross into (blocked in favor of
+    # ExitWorktree): (a) cwd sits inside a worktree of $CLAUDE_PROJECT_DIR — the
+    # main root is $CLAUDE_PROJECT_DIR; (b) $CLAUDE_PROJECT_DIR is itself a linked
+    # worktree — the main root is derived from its .git linkage. Otherwise there
+    # is no worktree and main_root is just $CLAUDE_PROJECT_DIR (never excluded).
     worktree = _worktree_root(cwd, project_dir)
-    effective_root = worktree or project_dir
-    in_worktree = bool(worktree)
+    if worktree:
+        effective_root, in_worktree, main_root = worktree, True, project_dir
+    else:
+        detected_main = _worktree_main_root(project_dir)
+        effective_root, in_worktree = project_dir, bool(detected_main)
+        main_root = detected_main or project_dir
 
     if event_name == "PreToolUse":
-        handle_pretooluse(hook_input, cwd, effective_root, in_worktree, project_dir)
+        handle_pretooluse(hook_input, cwd, effective_root, in_worktree, main_root)
     elif event_name == "PostToolUse":
         handle_posttooluse(cwd, effective_root, in_worktree)
     else:
@@ -158,11 +208,12 @@ def _is_cd_to_root(command: str, root: str) -> bool:
     """True if ``command`` is the sanctioned root-anchored form.
 
     Matches bare ``cd <root>`` and ``cd <root> && <rest>``, with the path
-    unquoted, "double"-quoted, or 'single'-quoted. Rejects ``;`` and ``||``
-    separators — only ``&&`` preserves the cd-first invariant.
+    unquoted, "double"-quoted, or 'single'-quoted, optionally followed by
+    redirections (``2>&1``, ``>f`` …) before the ``&&``. Rejects ``;`` and
+    ``||`` separators — only ``&&`` preserves the cd-first invariant.
     """
     escaped = re.escape(root)
-    pattern = rf"""^cd\s+(?:{escaped}|"{escaped}"|'{escaped}')\s*(?:&&\s*.+)?$"""
+    pattern = rf"""^cd\s+(?:{escaped}|"{escaped}"|'{escaped}'){_REDIRS}\s*(?:&&\s*.+)?$"""
     return bool(re.match(pattern, command))
 
 
@@ -290,7 +341,7 @@ def _drift_warn_message(cwd: str, root: str, in_worktree: bool) -> str:
 
 
 def handle_pretooluse(
-    hook_input: dict, cwd: str, root: str, in_worktree: bool, project_dir: str
+    hook_input: dict, cwd: str, root: str, in_worktree: bool, main_root: str
 ) -> None:
     """Allow root-anchored commands; block drift-inducing cd and wrong-cwd work."""
     command = hook_input.get("tool_input", {}).get("command", "").strip()
@@ -310,14 +361,24 @@ def handle_pretooluse(
         # cross-root transition (governed by ExitWorktree, decision (h)), not a
         # subdir descent — never rewrite it; fall through to the worktree block.
         # The target is compared de-quoted, so a spaced/quoted main-root path is
-        # excluded just as a bare one is.
+        # excluded just as a bare one is. `main_root` is the main repo even when
+        # $CLAUDE_PROJECT_DIR is itself the worktree (see main()).
         target = _cd_and_target(command)
-        if target and cwd == root and not (in_worktree and target == project_dir):
+        if target and cwd == root and not (in_worktree and target == main_root):
             _rewrite_to_subshell(hook_input, command)
         _block(_cd_block_message(root, in_worktree))
 
-    # Rule 1: any other command from the effective root is fine.
+    # Rule 1: any other command from the effective root is fine — unless it
+    # smuggles a drift-inducing `cd` after a top-level separator (`mkdir && cd
+    # sub && …`). A leading/bare `cd` was already handled by Rule 3; this catches
+    # the embedded case that would otherwise drift and only be caught after the
+    # fact by PostToolUse. The `(cd sub && …)` subshell form is never matched
+    # (the `cd` does not immediately follow the separator), so the sanctioned
+    # escape hatch still works. The block reuses the Rule 3 message, which already
+    # recommends that subshell form.
     if cwd == root:
+        if _EMBEDDED_CD.search(command):
+            _block(_cd_block_message(root, in_worktree))
         sys.exit(0)
 
     # Rule 4: drift already happened — block until cwd is restored.

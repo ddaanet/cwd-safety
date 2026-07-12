@@ -24,7 +24,12 @@ from hook stdin. The **effective root** `E` is the enclosing git-worktree root
 when `cwd` is inside a worktree of `$CLAUDE_PROJECT_DIR` — detected from the
 on-disk `.git` linkage (a worktree's `.git` is a file whose `gitdir:` resolves
 under `$CLAUDE_PROJECT_DIR/.git`) — otherwise `$CLAUDE_PROJECT_DIR`. All
-decisions below are made against `E`.
+decisions below are made against `E`. When `$CLAUDE_PROJECT_DIR` is *itself* a
+linked worktree (its own `.git` file reads `gitdir: <main>/.git/worktrees/<name>`
+— the shape of a background worktree session), the hook still treats it as a
+worktree: `E = $CLAUDE_PROJECT_DIR` and the main repo root `<main>` is derived
+from that linkage, so a `cd` to `<main>` is a governed cross-root move
+(`ExitWorktree`), not a subdir rewrite. See decision (h).
 
 **FR3 (allow-silent).** On `PreToolUse`: if `W == E` and the command `C` does
 not begin with `cd`, the hook exits 0 silently (no output, no block).
@@ -33,7 +38,11 @@ not begin with `cd`, the hook exits 0 silently (no output, no block).
 `cd "E"`, `cd 'E'`, `cd E && <rest>`, `cd "E" && <rest>`, and
 `cd 'E' && <rest>` — where `E` is an exact match for the effective root,
 and `&&` is the only accepted separator — are allowed from any `W`. No other
-separator (`; `, `||`) qualifies.
+separator (`; `, `||`) qualifies. **Redirections may sit between the target and
+the `&&`** (`cd E 2>&1 && <rest>`, `cd E >log && <rest>`, `cd E 2>/dev/null`): a
+redirection does not change the cd-first `&&` semantics, so it neither blocks the
+allow nor licenses a non-`&&` separator (`cd E 2>&1; <rest>` still blocks). See
+decision (j).
 
 **FR5 (proactive cd block).** On `PreToolUse`: any command whose first token
 is `cd` (i.e., `cd`, `cd …`, `cd;…`, or `cd&&…`, but not `cdfoo`) that does
@@ -52,7 +61,8 @@ hook returns `permissionDecision: "allow"` with `hookSpecificOutput.updatedInput
 replacing the command with `(cd <dir> && <rest>)`, scoping the directory change
 to a non-persisting subshell so cwd stays at `E` by construction. The `<dir>`
 argument may contain spaces when double-quoted, single-quoted, or
-backslash-escaped. The rewrite is announced on both channels — never silent — but
+backslash-escaped, and may be followed by redirections before the `&&`
+(`cd sub 2>&1 && <rest>` → `(cd sub 2>&1 && <rest>)`; see FR4 / decision (j)). The rewrite is announced on both channels — never silent — but
 **neither note echoes the command** (Claude Code already surfaces the rewritten
 `updatedInput`, so re-echoing is bloat): `additionalContext` tells the agent cwd
 did not persist and recommends the *wrapped* `(cd <dir> && <command>)` form for
@@ -66,6 +76,18 @@ a subdir descent; the target is compared de-quoted so a quoted/spaced main-root
 path is excluded too). From a drifted cwd (`W != E`) the same `cd <dir> && <rest>`
 is still blocked (FR6): the agent must restore `E` first, since a subshell from
 the wrong cwd would run the tail from the wrong cwd.
+
+**FR5b (embedded-cd block).** On `PreToolUse`, when `W == E`: a command that is
+not itself a leading `cd` but contains a `cd` running in the current shell right
+after a top-level sequencing operator (`&&`, `||`, `;`, `&`, or a newline) — e.g.
+`mkdir -p tools && cd tools && …`, `echo hi; cd sub` — is blocked with the Rule 5
+message (which recommends the `(cd sub && …)` subshell form). The `cd` must
+*immediately* follow the separator, so a `(cd sub && …)` subshell and a
+`foo | cd sub` pipeline (single `|`, its `cd` runs in a subshell) are never
+caught. This is a narrow drift detector, not a shell parser: a quoted literal
+containing `&& cd` is a known, accepted false positive (it only causes a block).
+The contrived leading form `cd E && cd sub && …` is *not* covered — it satisfies
+FR4 and is allowed (see Limitations). See decision (j).
 
 **FR6 (drift block).** On `PreToolUse`: if `W != E` and the command is not
 the root-anchored form (FR4) and does not trigger FR5, the hook blocks with
@@ -273,6 +295,21 @@ no single Bash call legitimately needs both roots. The cost is read-only
 filesystem access (see NFR1/NFR3); the exact-match principle of decision (d) is
 preserved for the `cd E` command match — only detection reads the filesystem.
 
+A second worktree shape must be handled: a session whose `$CLAUDE_PROJECT_DIR` is
+*itself* the worktree path (observed in a background worktree session, id
+`5935efe7`). There `_worktree_root(cwd, project_dir)` finds nothing — `cwd` never
+sits *under a different* project dir — so without extra detection the hook cannot
+tell it is in a worktree at all. That gap let the session subshell a
+`cd <main> && git worktree remove --force <worktree>` (decision (i)) and **delete
+its own cwd**, then get trapped with an effective root that no longer existed.
+`_worktree_main_root` closes it: if `$CLAUDE_PROJECT_DIR/.git` is a worktree
+`.git` file, the main repo root is sliced from its `gitdir:` (`<main>` is the path
+before `/.git/worktrees/`), `in_worktree` is set, and the decision-(i) cross-root
+exclusion then blocks the `cd <main>` in favor of `ExitWorktree`. This *prevents*
+the trap; it cannot un-brick a session whose cwd was already deleted — no
+`PreToolUse` hook can persistently change the Bash cwd (see also decision (h)
+alternative 4).
+
 **Alternatives considered:** (1) Trust a `worktree` payload field — rejected, it
 does not exist. (2) `.claude/worktrees/` path convention — rejected, arbitrary
 and relocated worktrees defeat it. (3) Accept both `R` and the worktree root —
@@ -341,6 +378,45 @@ scope, so wrapping it (`(cd subdir)`) is a no-op that would suppress the teachin
 block. (4) Rewrite from a drifted cwd too — rejected: it would run the tail from
 the wrong directory; restore must come first.
 
+### (j) Redirect tolerance and the narrow embedded-cd block
+
+**Decision:** (1) The root-anchored allow (FR4) and the subshell rewrite (FR5a)
+tolerate shell redirections between the `cd` target and the `&&`. (2) An embedded
+`cd` running in the current shell right after a top-level separator (FR5b) is
+blocked, even though `cd` is not the command's leading token.
+
+**Rationale:** Both come straight from session `5935efe7`, where the agent, once
+its cwd was deleted, repeatedly wrote natural forms the matchers mishandled.
+`cd <dir> 2>&1 && <cmd>` — capturing the `cd`'s own diagnostics — was blocked
+because a redirection sat between the path and the `&&`; yet a redirection cannot
+change the cd-first guarantee `&&` provides (the tail still runs only if `cd`
+succeeds), so tolerating it is free on the security axis. The redirection grammar
+is deliberately bounded — an fd-dup (`2>&1`, no filename) or a filename token that
+excludes `& | ; < > ( )` — so it can never swallow the `&&` or introduce a second
+command; a non-`&&` separator (`cd E 2>&1; <cmd>`) still blocks (decision (c)
+holds). The exact path match (decision (d)) is untouched: the redirections sit
+*after* the exactly-matched path.
+
+The embedded-cd block narrows the "contrived `cd R && cd subdir` passes" gap for
+its most common real shape, `<setup> && cd <subdir> && <work>`, which drifts from
+root and was previously only caught after the fact by PostToolUse. It is a
+deliberately *narrow* regex, not a shell parser: requiring the `cd` to immediately
+follow the separator excludes the sanctioned `(cd sub && …)` subshell and pipe
+subshells for free, and the residual false positives (a quoted `"&& cd"` literal;
+a no-op `echo x && cd E`) only ever *block* — the agent re-forms the command — so
+they cost ergonomics, never safety. This is a targeted retreat from the
+"don't chase an exhaustive blocklist" non-goal, not an abandonment of it:
+PostToolUse remains the backstop for `pushd`, `source`, `&& cd` inside a
+root-anchored FR4 command, and everything the regex cannot see.
+
+**Alternatives considered:** (1) Allow arbitrary tokens (not just redirections)
+between the target and `&&` — rejected: junk like `cd E ; rm && cmd` would break
+the cd-first invariant. (2) Rewrite the embedded `cd` into a subshell rather than
+block — rejected: correctly splitting a chain around quotes and nested subshells
+needs a real parser (chosen over in brainstorming). (3) Leave embedded `cd` to
+PostToolUse entirely — rejected: the drift executes at least one command from the
+wrong cwd before the warning fires, the failure mode the block exists to prevent.
+
 ## Limitations
 
 - **`pushd`/`popd` are not intercepted.** The `_LEADING_CD` regex only matches
@@ -351,7 +427,15 @@ the wrong directory; restore must come first.
   `_is_cd_to_root` regex matches the entire command against the root-anchored
   pattern. A command starting with `cd R &&` satisfies FR4, so the rest of the
   pipeline executes — including a second `cd subdir`. PostToolUse is the
-  backstop for this case.
+  backstop for this case. Note the embedded-cd block (FR5b / decision (j))
+  catches the *non*-leading shape (`<setup> && cd subdir && …`) but deliberately
+  does **not** touch this leading-`cd R &&` form, which FR4 allows by design.
+
+- **Embedded-cd detection is a regex, not a parser.** FR5b flags a `cd` only when
+  it immediately follows a top-level separator. It misses a `cd` reached another
+  way (inside `$(…)` that escapes to the parent, an aliased/function `cd`) and
+  false-positives on a quoted `"&& cd"` literal — the latter only blocks, so it is
+  safe if occasionally inconvenient. PostToolUse remains the ultimate backstop.
 
 - **Single-root only.** The hook is keyed to a single `$CLAUDE_PROJECT_DIR`.
   Multi-root setups (nested worktrees, monorepo sub-roots) are not supported.
@@ -429,3 +513,15 @@ than blocking and making the agent reissue it (FR5a). Free on the security axis
 mutation, paid down by a mandatory dual-channel announcement. Narrowly scoped:
 fires only from `W == E`, requires an `&&` tail and a path, excludes `;`/`||`
 and (in a worktree) a cross-root `cd $CLAUDE_PROJECT_DIR`. See decision (i).
+
+**2026-07-12 — redirect tolerance, embedded-cd block, CPD-is-worktree guard**
+(this repo). Debugging session `5935efe7` (a background worktree session with
+`$CLAUDE_PROJECT_DIR` set to the worktree path) surfaced three defects, all fixed
+here: (1) FR4/FR5a now tolerate redirections between the `cd` target and the `&&`
+(`cd E 2>&1 && …`), which the matchers previously rejected; (2) a new FR5b blocks
+an embedded `cd` after a top-level separator (`mkdir … && cd sub && …`) instead of
+letting it drift; (3) `_worktree_main_root` recognizes a `$CLAUDE_PROJECT_DIR`
+that is itself a linked worktree, so a `cd` to the main repo is blocked
+(`ExitWorktree`) rather than subshelled — which in that session had let the agent
+`git worktree remove` its own cwd and become trapped. See decision (j) and the
+decision (h) extension.
