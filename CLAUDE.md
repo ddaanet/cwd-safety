@@ -43,9 +43,14 @@ and runs the test suite. Must be green before committing.
 Canonical statement lives in `DESIGN.md` (FR1–FR9). In short, at
 `PreToolUse(Bash)` with **effective root `E`** (the enclosing git-worktree root
 when `cwd` is inside a worktree of `$CLAUDE_PROJECT_DIR`, detected from the
-on-disk `.git` linkage; **or `$CLAUDE_PROJECT_DIR` itself when it is a linked
-worktree** — a background worktree session, main root derived from the `.git`
-linkage; else `$CLAUDE_PROJECT_DIR`) and cwd `W`:
+on-disk `.git` linkage, else `$CLAUDE_PROJECT_DIR` — including when
+`$CLAUDE_PROJECT_DIR` is *itself* a worktree path, which is governed as a plain
+root) and cwd `W`:
+
+0. **`E` does not exist on disk** (deleted out from under the session) → **fail
+   open**: allow every command silently, before all rules below. `PostToolUse`
+   then says the guard is disabled — restart the session. See `DESIGN.md` →
+   FR7a / decision (k).
 
 1. `W == E` and `C` is not a `cd` → allow silently.
 2. `cd E` / `cd E && <rest>` (exact-path, `&&`-only) → allow from any `W`.
@@ -69,8 +74,10 @@ linkage; else `$CLAUDE_PROJECT_DIR`) and cwd `W`:
      `DESIGN.md` → FR5b / decision (j).
 4. `W != E`, any other command → block with the `cd E` restore hint.
 
-At `PostToolUse(Bash)`: if `W != E`, emit a warning on both
-`hookSpecificOutput.additionalContext` and `systemMessage`; else silent.
+At `PostToolUse(Bash)`: if `E` is gone, emit the fail-open "guard disabled —
+restart" notice (replacing the impossible `cd E` hint); else if `W != E`, emit
+the drift warning on both `hookSpecificOutput.additionalContext` and
+`systemMessage`; else silent.
 
 ## Conventions
 

@@ -17,7 +17,8 @@
     "superpowers@claude-plugins-official": true,
     "gitlore@ddaanet": true,
     "shell-scripting@ddaanet": true,
-    "plugin-dev@claude-plugins-official": true
+    "plugin-dev@claude-plugins-official": true,
+    "handoff@ddaanet": true
   },
   "gitlore": {
     "enabled": true,

@@ -26,10 +26,10 @@ on-disk `.git` linkage (a worktree's `.git` is a file whose `gitdir:` resolves
 under `$CLAUDE_PROJECT_DIR/.git`) — otherwise `$CLAUDE_PROJECT_DIR`. All
 decisions below are made against `E`. When `$CLAUDE_PROJECT_DIR` is *itself* a
 linked worktree (its own `.git` file reads `gitdir: <main>/.git/worktrees/<name>`
-— the shape of a background worktree session), the hook still treats it as a
-worktree: `E = $CLAUDE_PROJECT_DIR` and the main repo root `<main>` is derived
-from that linkage, so a `cd` to `<main>` is a governed cross-root move
-(`ExitWorktree`), not a subdir rewrite. See decision (h).
+— the shape of a background worktree session), `_worktree_root` finds no
+*enclosing* worktree, so `E = $CLAUDE_PROJECT_DIR` and the hook governs it as an
+ordinary root: a `cd` to the main repo is a benign subdir-style subshell rewrite,
+not a cross-root block. See decision (k).
 
 **FR3 (allow-silent).** On `PreToolUse`: if `W == E` and the command `C` does
 not begin with `cd`, the hook exits 0 silently (no output, no block).
@@ -98,6 +98,18 @@ exit 2 and a stderr message showing the current `W` and the restore command
 payload containing `hookSpecificOutput.additionalContext` and `systemMessage`
 with a warning showing `W` and the restore command. If `W == E`, the hook
 exits 0 silently.
+
+**FR7a (fail-open on a deleted root).** When `E` is non-empty but no longer
+exists on disk (`os.path.isdir(E)` is false — a worktree removed out from under
+the session, an external `rm`, etc.), the guard's contract "keep cwd at `E`" is
+unsatisfiable. On `PreToolUse` the hook then allows *every* command silently,
+before all other rules (FR3–FR6) — even a leading `cd` — so the agent can work
+from wherever the shell fell back to. On `PostToolUse` it emits a *replacement*
+warning (both channels) that names `E`, states the guard is disabled for the
+session, and says to restart — superseding the FR7 `cd E` hint, which is
+impossible once `E` is gone. `E == ""` (no `$CLAUDE_PROJECT_DIR`) is a different
+degenerate state and does not trigger fail-open. Because `E` stays gone, the
+guard is effectively off for the remainder of the session. See decision (k).
 
 **FR8 (wiring).** `hooks/hooks.json` registers `scripts/cwd-safety.py` via
 `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/cwd-safety.py` for both
@@ -295,20 +307,12 @@ no single Bash call legitimately needs both roots. The cost is read-only
 filesystem access (see NFR1/NFR3); the exact-match principle of decision (d) is
 preserved for the `cd E` command match — only detection reads the filesystem.
 
-A second worktree shape must be handled: a session whose `$CLAUDE_PROJECT_DIR` is
-*itself* the worktree path (observed in a background worktree session, id
-`5935efe7`). There `_worktree_root(cwd, project_dir)` finds nothing — `cwd` never
-sits *under a different* project dir — so without extra detection the hook cannot
-tell it is in a worktree at all. That gap let the session subshell a
-`cd <main> && git worktree remove --force <worktree>` (decision (i)) and **delete
-its own cwd**, then get trapped with an effective root that no longer existed.
-`_worktree_main_root` closes it: if `$CLAUDE_PROJECT_DIR/.git` is a worktree
-`.git` file, the main repo root is sliced from its `gitdir:` (`<main>` is the path
-before `/.git/worktrees/`), `in_worktree` is set, and the decision-(i) cross-root
-exclusion then blocks the `cd <main>` in favor of `ExitWorktree`. This *prevents*
-the trap; it cannot un-brick a session whose cwd was already deleted — no
-`PreToolUse` hook can persistently change the Bash cwd (see also decision (h)
-alternative 4).
+This decision governs the shape where `cwd` sits *inside* a worktree of
+`$CLAUDE_PROJECT_DIR`. The mirror shape — `$CLAUDE_PROJECT_DIR` set to the
+worktree path *itself* (a background worktree session) — is deliberately *not*
+special-cased here: `_worktree_root` finds no enclosing worktree, so `E` is that
+path and it is governed as a plain root. See decision (k) for why the earlier
+`_worktree_main_root` special-case was removed.
 
 **Alternatives considered:** (1) Trust a `worktree` payload field — rejected, it
 does not exist. (2) `.claude/worktrees/` path convention — rejected, arbitrary
@@ -417,6 +421,49 @@ needs a real parser (chosen over in brainstorming). (3) Leave embedded `cd` to
 PostToolUse entirely — rejected: the drift executes at least one command from the
 wrong cwd before the warning fires, the failure mode the block exists to prevent.
 
+### (k) Fail open on a deleted root; drop the shape-2 self-destruct guard
+
+**Decision:** (1) When the effective root `E` does not exist on disk, the hook
+fails open — PreToolUse allows everything silently, PostToolUse emits a "guard
+disabled — restart" notice (FR7a). (2) The `_worktree_main_root` special-case
+(which treated a `$CLAUDE_PROJECT_DIR` that is itself a linked worktree as a
+worktree, blocking `cd <main>` in favor of `ExitWorktree`) is removed; that shape
+is now governed as a plain root.
+
+**Rationale:** Both come from the aftermath of session `5935efe7`, where a
+background worktree session ran `cd <main> && git worktree remove --force <self>`,
+deleting its own cwd. The shell fell back to the main repo, but `E` still pointed
+at the now-gone worktree, so every command hit the FR6 drift block, the `cd E`
+restore no-oped (target gone), and the Bash tool deadlocked. The guard's whole
+contract is "keep cwd at `E`"; once `E` is gone that contract is meaningless, and
+the only coherent behavior is to step aside. Fail-open covers *every* deletion
+vector — self-removal, another session's `git worktree remove`, `git worktree
+prune`, an external `rm` — because it keys on the on-disk fact, not the mechanism.
+
+The `_worktree_main_root` guard was added earlier to *prevent* this trap by
+blocking the self-`cd <main>`. But its advice was a dead end: `ExitWorktree` is a
+no-op for a background worktree session (it only exits a worktree the current
+session created via `EnterWorktree`), so the guard steered the agent to a tool
+that does nothing while blocking the one working cleanup path
+(`cd <main> && git worktree remove <self>`). Once fail-open makes the trap
+survivable, the guard only forbids legitimate post-merge cleanup, so it is
+removed. The shape then behaves as a plain root: `cd <main> && …` is a benign
+non-persisting subshell rewrite, and drift blocks with a plain `cd <E>` hint.
+
+**Consciously re-accepted:** an *accidental* self-destruct is no longer
+hard-blocked. Mitigations: `git worktree remove` refuses a dirty worktree without
+`--force`; `--force` is an explicit opt-in to destruction; the incident's real
+safety was the agent asking the user first; cwd-safety was never a data-loss
+guard; and fail-open makes the outcome recoverable regardless.
+
+**Alternatives considered:** (1) Allow a narrow `mkdir -p E && cd E` restore —
+rejected: it recreates a hollow non-git directory, and the shell is *already* at a
+valid dir (main), so there is nothing to restore to. (2) Detect the deleted-root
+state and re-anchor `E` to the fallback dir — rejected: needs state the hook does
+not have and the path heuristics decision (h) already refused. (3) Keep the
+shape-2 guard and document `ExitWorktree` as the exit — rejected: `ExitWorktree`
+is a no-op for this session shape, so the documented exit does not exist.
+
 ## Limitations
 
 - **`pushd`/`popd` are not intercepted.** The `_LEADING_CD` regex only matches
@@ -450,6 +497,13 @@ wrong cwd before the warning fires, the failure mode the block exists to prevent
   is not pure-stdin; it stats ancestors of `cwd` and reads one `.git` file. A
   worktree whose `.git` linkage does not resolve under `$CLAUDE_PROJECT_DIR/.git`
   (e.g. a different repo) is treated as drift, not as a valid anchor.
+
+- **The guard disables itself for the rest of a session after root deletion.**
+  Once `E` no longer exists on disk, fail-open (FR7a / decision (k)) allows every
+  command; `E` never comes back, so there is no re-anchoring within that session.
+  This is intended — a worktree session that removed its own worktree is winding
+  down at the main repo — and the PostToolUse notice tells the human to restart to
+  re-establish a valid root.
 
 ## History
 
@@ -525,3 +579,16 @@ that is itself a linked worktree, so a `cd` to the main repo is blocked
 (`ExitWorktree`) rather than subshelled — which in that session had let the agent
 `git worktree remove` its own cwd and become trapped. See decision (j) and the
 decision (h) extension.
+
+**2026-07-13 — fail open on a deleted root; drop the shape-2 guard** (this repo).
+Examining the `5935efe7` transcript showed the self-destruct trap was worse than
+the previous entry's fix assumed: after the worktree was removed the shell fell
+back to the main repo but `E` stayed pinned to the gone worktree, the `cd E`
+restore no-oped, and the Bash tool deadlocked — and `ExitWorktree` (the guard's
+advice) is a no-op for a background worktree session. Two changes: (1) FR7a —
+when `E` no longer exists on disk the hook fails open (PreToolUse allows all;
+PostToolUse says "guard disabled — restart"), making the trap recoverable for
+*any* deletion vector; (2) the `_worktree_main_root` shape-2 guard from `d8b6a3a`
+is removed — its `ExitWorktree` advice was a dead end and it blocked legitimate
+`cd <main> && git worktree remove <self>` cleanup. The redirect tolerance and
+FR5b from `d8b6a3a` are kept. See decision (k).

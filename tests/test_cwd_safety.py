@@ -16,16 +16,18 @@ import subprocess
 import sys
 import tempfile
 
-ROOT = "/project/root"  # pretend $CLAUDE_PROJECT_DIR for the non-worktree cases
-SUB = "/project/root/subdir"
-
 HOOK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts", "cwd-safety.py")
 
-# ── Real on-disk fixtures for filesystem worktree detection ─────────────────
-# Detection reads the `.git` linkage, so worktree cases need actual dirs/files.
+# ── Real on-disk fixtures ───────────────────────────────────────────────────
+# Two reasons the roots must exist on disk: worktree detection reads the `.git`
+# linkage, and the fail-open rule calls `os.path.isdir(root)` — a fake root would
+# fail open and silently allow everything, gutting the drift/block assertions.
 _TMP = tempfile.mkdtemp(prefix="cwdsafety-test-")
 atexit.register(shutil.rmtree, _TMP, ignore_errors=True)
 
+ROOT = os.path.join(_TMP, "root")        # non-worktree project root (must exist)
+SUB = os.path.join(ROOT, "subdir")       # a drifted cwd under the main root
+GONE = os.path.join(_TMP, "deleted-root")  # NEVER created — a deleted effective root
 PROJ = os.path.join(_TMP, "proj")        # a real project root
 WT = os.path.join(_TMP, "wt1")           # worktree root OUTSIDE proj (location-independent)
 WTSUB = os.path.join(WT, "src")          # a subdir inside the worktree
@@ -35,6 +37,7 @@ OTHER = os.path.join(_TMP, "other")      # foreign repo: .git is a directory
 EVIL = os.path.join(_TMP, "evil")        # spoof: .git file whose gitdir is outside PROJ
 BINGIT = os.path.join(_TMP, "bingit")    # dir whose .git is non-UTF-8 bytes
 
+os.makedirs(SUB)  # also creates ROOT; GONE is deliberately left absent
 os.makedirs(os.path.join(PROJ, ".git", "worktrees", "wt1"))
 os.makedirs(PROJSUB)
 os.makedirs(WTSUB)
@@ -292,21 +295,54 @@ check("embedded: `foo | cd x` (pipe subshell) allowed",
 check("embedded: quoted `&& cd` literal blocks (documented false positive)",
       blocked("PreToolUse", ROOT, 'echo "x && cd y"'))
 
-# ── FR: $CLAUDE_PROJECT_DIR is itself a linked worktree ──────────────────────
-# The self-destruct case from session 5935efe7: CPD == the worktree path. The
-# hook must recognize the worktree (from its own .git linkage) so a `cd` to the
-# main repo is a governed cross-root move (ExitWorktree), not a subdir rewrite.
+# ── FR: $CLAUDE_PROJECT_DIR is itself a linked worktree → treated as a plain root ─
+# The shape-2 self-destruct guard was removed: its `ExitWorktree` advice was a
+# dead end (that tool is a no-op for a background worktree session it did not
+# create). With CPD == the worktree path and no *enclosing* project dir,
+# `_worktree_root` finds nothing, so the hook governs it as an ordinary root
+# E=CPD. A `cd <main> && …` is then a benign subdir-style subshell rewrite (not a
+# cross-root block), and drift blocks with a plain `cd <CPD>` hint — no
+# `ExitWorktree`. The now-survivable self-destruct is covered by fail-open below.
 check("cpd-wt: `ls` at CPD=worktree allowed", allowed("PreToolUse", WT, "ls", root=WT))
 check("cpd-wt: `cd src && ls` rewritten to subshell",
       rewritten("PreToolUse", WT, "cd src && ls", "(cd src && ls)", root=WT))
-check("cpd-wt: `cd MAIN && git worktree remove` BLOCKED (not subshelled)",
-      blocked("PreToolUse", WT, f"cd {PROJ} && git worktree remove .claude/worktrees/wt1", root=WT))
-check("cpd-wt: cross-root block names ExitWorktree",
-      blocked_with("PreToolUse", WT, f"cd {PROJ} && git worktree remove x", "ExitWorktree", root=WT))
-check("cpd-wt: session command `cd MAIN && git worktree remove --force x 2>&1` blocked",
-      blocked("PreToolUse", WT, f"cd {PROJ} && git worktree remove --force x 2>&1", root=WT))
-check("cpd-wt: drift inside CPD=worktree blocked, message says 'worktree'",
-      blocked_with("PreToolUse", WTSUB, "ls", "worktree", root=WT))
+check("cpd-wt: `cd MAIN && cmd` rewritten to subshell (no cross-root block)",
+      rewritten("PreToolUse", WT, f"cd {PROJ} && git worktree remove x",
+                f"(cd {PROJ} && git worktree remove x)", root=WT))
+_c, _o, cpd_err = run("PreToolUse", WTSUB, "ls", root=WT)
+check("cpd-wt: drift blocks with plain `cd CPD` hint, no ExitWorktree",
+      _c == 2 and WT in cpd_err and "ExitWorktree" not in cpd_err and "worktree" not in cpd_err)
+
+
+# ── FR: fail open when the effective root no longer exists on disk ────────────
+# A session whose effective root E was deleted out from under it (a worktree
+# removed via `git worktree remove --force <self>`; the shell then falls back to
+# the main repo) must not be bricked. With E gone the guard's contract ("keep cwd
+# at E") is unsatisfiable, so PreToolUse steps aside — allow-silent, before every
+# rule, so even a leading `cd` is freed — and PostToolUse swaps the impossible
+# `cd E` restore hint for a "guard disabled — restart" notice.
+check("failopen: `ls` allowed when root deleted (W==E)",
+      allowed("PreToolUse", GONE, "ls", root=GONE))
+check("failopen: `ls` allowed when root deleted (W!=E, shell fell back to main)",
+      allowed("PreToolUse", PROJ, "ls", root=GONE))
+check("failopen: arbitrary `cd /tmp` allowed when root deleted",
+      allowed("PreToolUse", PROJ, "cd /tmp", root=GONE))
+check("failopen: `mkdir -p x && cd x` allowed when root deleted",
+      allowed("PreToolUse", PROJ, "mkdir -p x && cd x", root=GONE))
+check("failopen: even a leading `cd subdir` allowed when root deleted",
+      allowed("PreToolUse", GONE, "cd subdir", root=GONE))
+# PostToolUse: replacement warning — names the root, says disabled/restart, and
+# omits the now-impossible `cd E` restore hint.
+_c, fo_out, _e = run("PostToolUse", PROJ, "ls", root=GONE)
+fo = _c == 0 and "additionalContext" in fo_out
+if fo:
+    fo_ctx = json.loads(fo_out)["hookSpecificOutput"]["additionalContext"]
+    fo = (GONE in fo_ctx and "disabled" in fo_ctx and "Restart" in fo_ctx
+          and "Run: cd" not in fo_ctx and "restore" not in fo_ctx.lower())
+check("failopen: PostToolUse warns 'guard disabled — restart', no `cd E` hint", fo)
+# A real-but-oddly-spelled root (trailing slash) is live, not deleted: no fail-open.
+check("failopen: trailing-slash live root is not seen as deleted",
+      blocked("PreToolUse", SUB, "ls", root=ROOT + os.sep))
 
 
 if _fails:

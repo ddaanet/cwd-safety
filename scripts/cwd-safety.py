@@ -25,6 +25,12 @@ PostToolUse(Bash):
 5. ``W != R`` after a command ran → inject an additionalContext + systemMessage
    warning. ``W == R`` → silent.
 
+Fail-open: if the effective root ``R`` no longer exists on disk (a worktree
+removed out from under the session, say), the guard's contract is unsatisfiable.
+PreToolUse allows every command silently and PostToolUse swaps the impossible
+``cd R`` restore hint for a "guard disabled — restart the session" notice. The
+root stays gone, so the guard is effectively off for the rest of the session.
+
 Security: ``cd R && cmd`` is equivalent to running ``cmd`` from project root.
 The ``&&`` ensures ``cmd`` runs only if the ``cd`` succeeds. Only ``&&`` is
 accepted (not ``;`` or ``||``) to guarantee the cd-first invariant. Exact path
@@ -150,25 +156,6 @@ def _worktree_root(cwd: str, project_dir: str) -> str:
         d = parent
 
 
-def _worktree_main_root(project_dir: str) -> str:
-    """Main repo root if ``project_dir`` is *itself* a linked worktree, else "".
-
-    Some sessions (notably background worktree sessions) set
-    ``$CLAUDE_PROJECT_DIR`` to the worktree path itself. Then ``_worktree_root``
-    finds nothing (``cwd`` never sits *under a different* project dir), and
-    without this the hook cannot tell it is in a worktree — so it would wrongly
-    subshell a ``cd`` to the main repo (which let a session delete its own
-    worktree, see DESIGN history). A linked worktree's ``.git`` is a file
-    ``gitdir: <main>/.git/worktrees/<name>``; the main root is the path before
-    ``/.git/worktrees/``. Exact string slice, no normalization — same sharp edge
-    as decision (d). Read-only filesystem access, no subprocess.
-    """
-    gitdir = _read_gitdir(os.path.join(project_dir, ".git")) if project_dir else ""
-    marker = os.sep + ".git" + os.sep + "worktrees" + os.sep
-    idx = gitdir.find(marker)
-    return gitdir[:idx] if (gitdir and idx != -1) else ""
-
-
 def main() -> None:
     """Dispatch on hook event; the effective root is always allowed.
 
@@ -182,22 +169,14 @@ def main() -> None:
     cwd = hook_input.get("cwd", "")
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
 
-    # Two worktree shapes yield an effective root, an in-worktree flag, and the
-    # *main* repo root that a `cd` must not cross into (blocked in favor of
-    # ExitWorktree): (a) cwd sits inside a worktree of $CLAUDE_PROJECT_DIR — the
-    # main root is $CLAUDE_PROJECT_DIR; (b) $CLAUDE_PROJECT_DIR is itself a linked
-    # worktree — the main root is derived from its .git linkage. Otherwise there
-    # is no worktree and main_root is just $CLAUDE_PROJECT_DIR (never excluded).
+    # The effective root is the enclosing worktree root when cwd sits inside a
+    # worktree of $CLAUDE_PROJECT_DIR, else $CLAUDE_PROJECT_DIR itself.
     worktree = _worktree_root(cwd, project_dir)
-    if worktree:
-        effective_root, in_worktree, main_root = worktree, True, project_dir
-    else:
-        detected_main = _worktree_main_root(project_dir)
-        effective_root, in_worktree = project_dir, bool(detected_main)
-        main_root = detected_main or project_dir
+    effective_root = worktree or project_dir
+    in_worktree = bool(worktree)
 
     if event_name == "PreToolUse":
-        handle_pretooluse(hook_input, cwd, effective_root, in_worktree, main_root)
+        handle_pretooluse(hook_input, cwd, effective_root, in_worktree, project_dir)
     elif event_name == "PostToolUse":
         handle_posttooluse(cwd, effective_root, in_worktree)
     else:
@@ -341,9 +320,20 @@ def _drift_warn_message(cwd: str, root: str, in_worktree: bool) -> str:
 
 
 def handle_pretooluse(
-    hook_input: dict, cwd: str, root: str, in_worktree: bool, main_root: str
+    hook_input: dict, cwd: str, root: str, in_worktree: bool, project_dir: str
 ) -> None:
     """Allow root-anchored commands; block drift-inducing cd and wrong-cwd work."""
+    # Fail open: if the effective root no longer exists on disk (e.g. a worktree
+    # session whose worktree was removed out from under it — the shell then falls
+    # back to the main repo), the guard's contract "keep cwd at `root`" is
+    # unsatisfiable. Step aside silently so the agent can work from wherever the
+    # shell landed. This precedes every rule, so even a leading `cd` is freed —
+    # the agent must be able to leave. PostToolUse explains it once per command.
+    # After a deletion the root stays gone, so the guard is effectively off for
+    # the rest of the session (see DESIGN limitation / decision (k)).
+    if root and not os.path.isdir(root):
+        sys.exit(0)
+
     command = hook_input.get("tool_input", {}).get("command", "").strip()
 
     # Rule 2: the sanctioned root-anchored form is always allowed.
@@ -360,11 +350,10 @@ def handle_pretooluse(
         # A `cd` to the main project root while a worktree is active is a
         # cross-root transition (governed by ExitWorktree, decision (h)), not a
         # subdir descent — never rewrite it; fall through to the worktree block.
-        # The target is compared de-quoted, so a spaced/quoted main-root path is
-        # excluded just as a bare one is. `main_root` is the main repo even when
-        # $CLAUDE_PROJECT_DIR is itself the worktree (see main()).
+        # The target is compared de-quoted, so a spaced/quoted project-dir path is
+        # excluded just as a bare one is.
         target = _cd_and_target(command)
-        if target and cwd == root and not (in_worktree and target == main_root):
+        if target and cwd == root and not (in_worktree and target == project_dir):
             _rewrite_to_subshell(hook_input, command)
         _block(_cd_block_message(root, in_worktree))
 
@@ -385,12 +374,31 @@ def handle_pretooluse(
     _block(_drift_block_message(cwd, root, in_worktree))
 
 
-def handle_posttooluse(cwd: str, root: str, in_worktree: bool) -> None:
-    """Warn (non-blocking) after cwd drift is detected."""
-    if cwd == root:
-        sys.exit(0)
+def _root_gone_message(root: str) -> str:
+    """PostToolUse notice when the effective root no longer exists on disk.
 
-    warning = _drift_warn_message(cwd, root, in_worktree)
+    Replaces the generic drift warning, whose `cd {root}` restore hint is
+    impossible once the root is gone. Tells the agent and the human that the
+    guard has disabled itself for the rest of the session (see fail-open in
+    ``handle_pretooluse``).
+    """
+    return (
+        f"⚠️  cwd-safety: the project root {root} no longer exists — the "
+        "working-directory guard is disabled for this session. You are likely "
+        "in the main repo now. Restart the session to re-establish a valid root."
+    )
+
+
+def handle_posttooluse(cwd: str, root: str, in_worktree: bool) -> None:
+    """Warn (non-blocking) after cwd drift, or when the root has vanished."""
+    if root and not os.path.isdir(root):
+        # Root deleted — the generic `cd {root}` restore hint is impossible, so
+        # emit the fail-open notice instead (guard disabled for the session).
+        warning = _root_gone_message(root)
+    elif cwd != root:
+        warning = _drift_warn_message(cwd, root, in_worktree)
+    else:
+        sys.exit(0)
 
     output = {
         "hookSpecificOutput": {
