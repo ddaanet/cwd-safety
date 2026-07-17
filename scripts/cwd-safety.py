@@ -65,6 +65,15 @@ _REDIRS = rf"(?:\s+{_REDIR})*"
 # containing `&& cd` is a known, accepted false positive (it only causes a block).
 _EMBEDDED_CD = re.compile(r"(?:&&|\|\||;|&|\n)\s*cd(?:\s|;|&|$)")
 
+# Leading blank lines and `#`-comment lines to skip before a command's first
+# effective statement (a shebang-like `#!/bin/bash` first line is one such comment).
+_LEADING_SKIP = re.compile(r"^(?:[ \t]*(?:#[^\n]*)?\n)*[ \t]*")
+
+# A `set` builtin turning shell errexit *on*: a `-`flag cluster containing `e`
+# (`-e`, `-eu`, `-euo`, `-ex`, …) or `-o errexit`. The `+` forms (`set +e`,
+# `set +o errexit`) disable it and must not match; the `-` anchors that.
+_SET_ERREXIT = re.compile(r"(?:^|\s)-[A-Za-z]*e[A-Za-z]*(?=\s|$)|(?:^|\s)-o\s+errexit(?=\s|$)")
+
 # `cd <dir> && <rest>`: a leading `cd` to a single directory argument, joined by
 # `&&` to a non-empty tail. The directory may contain spaces when quoted or
 # backslash-escaped, so the argument is matched as one of: a "double-quoted"
@@ -220,6 +229,25 @@ def _cd_and_target(command: str) -> str:
     return _unquote(m.group(1)) if m else ""
 
 
+def _starts_with_errexit(command: str) -> bool:
+    """True if ``command``'s first statement is a ``set`` that enables errexit.
+
+    Skips leading blank/``#``-comment lines, then requires the first statement to
+    be the ``set`` builtin with errexit turned *on* (``set -e``, ``set -euo
+    pipefail``, ``set -ex``, ``set -o errexit`` …). The ``+`` forms (``set +e``)
+    disable errexit and do not match; a ``set`` without errexit (``set -u``,
+    ``set -o pipefail``, bare ``set``) does not match either. Only the first
+    statement's own options are inspected — bounded to the first top-level
+    separator — so errexit is guaranteed active before any later ``cd``. With
+    that guarantee a failed ``cd`` aborts the script, exactly as ``&&`` would
+    (see DESIGN FR5c / decision (l)); ``set`` is matched with ``\\b`` so
+    ``setup`` is not mistaken for it.
+    """
+    head = command[_LEADING_SKIP.match(command).end():]
+    m = re.match(r"set\b([^\n;&|]*)", head)
+    return bool(m and _SET_ERREXIT.search(m.group(1)))
+
+
 def _block(message: str) -> None:
     """Deny a PreToolUse command: stderr message, exit 2."""
     sys.stderr.write(message + "\n")
@@ -238,16 +266,29 @@ _REWRITE_AGENT_NOTE = (
 )
 _REWRITE_USER_NOTE = "Wrapped command in a subshell."
 
+# FR5c announcements: a `set -e` script wrapped in a subshell. The agent note
+# says `set -e` (so a follow-up that assumed cwd persisted is corrected) and,
+# like Rule 3a, does not echo the command — Claude Code surfaces the rewrite.
+_SET_E_AGENT_NOTE = (
+    "Wrapped your `set -e` script in a subshell, so any `cd` inside it does not "
+    "persist and the working directory is unchanged. Keep multi-directory "
+    "scripts wrapped this way, or run each step from the effective root."
+)
+_SET_E_USER_NOTE = "Wrapped set -e script in a subshell."
 
-def _rewrite_to_subshell(hook_input: dict, command: str) -> None:
-    """Allow a `cd <dir> && <cmd>` command, rewritten to a non-persisting
-    subshell, and announce the rewrite on both channels. Exits 0.
+
+def _rewrite_to_subshell(
+    hook_input: dict, command: str, agent_note: str, user_note: str
+) -> None:
+    """Allow ``command``, rewritten to a non-persisting subshell, and announce
+    the rewrite on both channels. Exits 0.
 
     The subshell `( … )` runs the command in a child shell, so the parent's
     cwd stays at the effective root by construction — no drift to back out of.
     The rewrite is never silent (agent: additionalContext; user: systemMessage),
     but the notes do not echo the command — Claude Code already surfaces the
-    rewritten `updatedInput`.
+    rewritten `updatedInput`. ``agent_note``/``user_note`` are the channel texts
+    for the rewrite kind (Rule 3a `cd <dir> && <cmd>` vs FR5c `set -e` script).
     """
     new_input = dict(hook_input.get("tool_input", {}))
     new_input["command"] = "(" + command + ")"
@@ -256,10 +297,10 @@ def _rewrite_to_subshell(hook_input: dict, command: str) -> None:
             "hookEventName": "PreToolUse",
             "permissionDecision": "allow",
             "permissionDecisionReason": "cd scoped to a non-persisting subshell",
-            "additionalContext": _REWRITE_AGENT_NOTE,
+            "additionalContext": agent_note,
             "updatedInput": new_input,
         },
-        "systemMessage": _REWRITE_USER_NOTE,
+        "systemMessage": user_note,
     }
     print(json.dumps(output))
     sys.exit(0)
@@ -354,7 +395,9 @@ def handle_pretooluse(
         # excluded just as a bare one is.
         target = _cd_and_target(command)
         if target and cwd == root and not (in_worktree and target == project_dir):
-            _rewrite_to_subshell(hook_input, command)
+            _rewrite_to_subshell(
+                hook_input, command, _REWRITE_AGENT_NOTE, _REWRITE_USER_NOTE
+            )
         _block(_cd_block_message(root, in_worktree))
 
     # Rule 1: any other command from the effective root is fine — unless it
@@ -367,6 +410,17 @@ def handle_pretooluse(
     # recommends that subshell form.
     if cwd == root:
         if _EMBEDDED_CD.search(command):
+            # Rule 5c: a `set -e` script (errexit enabled by the first statement)
+            # is safe to scope to a non-persisting subshell instead of blocked —
+            # errexit gives the same cd-first guarantee as `&&` (a failed `cd`
+            # aborts before the tail runs), so the embedded `cd` cannot drift and
+            # cannot run the tail from the wrong cwd. Generalizes Rule 3a from a
+            # single `cd <dir> && <cmd>` to a whole fail-fast script. Fires only
+            # here, where an embedded `cd` would otherwise block (FR5b).
+            if _starts_with_errexit(command):
+                _rewrite_to_subshell(
+                    hook_input, command, _SET_E_AGENT_NOTE, _SET_E_USER_NOTE
+                )
             _block(_cd_block_message(root, in_worktree))
         sys.exit(0)
 

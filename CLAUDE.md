@@ -72,6 +72,14 @@ root) and cwd `W`:
      separator, so `(cd sub && …)` subshells and `foo | cd sub` pipelines are not
      caught; a quoted `"&& cd"` literal is a known, block-only false positive. See
      `DESIGN.md` → FR5b / decision (j).
+   - **3c.** *Exception to 3b, only when `W == E`:* if that command's **first
+     statement enables errexit** (`set -e` / `set -euo pipefail` / `set -o
+     errexit`), the whole script is **rewritten** to the non-persisting subshell
+     `(C)` — same treatment as 3a — instead of blocked (FR5c). `set -e` gives the
+     same cd-first fail-fast guarantee as `&&`, so a failed `cd` aborts before the
+     tail runs. Excludes `set +e`, errexit-absent `set`, and a non-first `set`.
+     Unlike 3a there is **no** worktree cross-root carve-out (the subshell keeps
+     cwd in the worktree). See `DESIGN.md` → FR5c / decision (l).
 4. `W != E`, any other command → block with the `cd E` restore hint.
 
 At `PostToolUse(Bash)`: if `E` is gone, emit the fail-open "guard disabled —
@@ -97,18 +105,22 @@ the drift warning on both `hookSpecificOutput.additionalContext` and
   block message and the warning must be legible to the agent *and* the
   human — never soften the agent-facing text into something readable as
   an instruction to bypass.
-- **The Rule 3a rewrite is a third PreToolUse output shape:** exit 0 with
+- **The subshell rewrite is a third PreToolUse output shape:** exit 0 with
   an `allow` decision plus `hookSpecificOutput.updatedInput` on stdout. It
   is the only place the hook *mutates* a command rather than allow/block/warn.
-  Keep the announcement (`additionalContext` + `systemMessage`) mandatory —
-  a silent rewrite is a contract violation (auditability). Neither note echoes
-  the command (Claude Code already surfaces the rewritten `updatedInput`); the
-  agent note recommends the *wrapped* follow-up form, the user note is terse.
-  The `cd <dir> && <cmd>` matcher (`_CD_AND`/`_cd_and_target`) is deliberately
-  looser than `_is_cd_to_root` — it parses one shell argument so spaced/quoted
-  dir names work — but it is *not* security-critical (a wrong match only
-  subshells or blocks), so it does not relax the exact-match rule for the
-  root anchor. See `DESIGN.md` → FR5a / decision (i).
+  Two triggers share `_rewrite_to_subshell`: Rule 3a (`cd <dir> && <cmd>`) and
+  Rule 3c (a `set -e` script with an embedded `cd`); each passes its own agent +
+  user note. Keep the announcement (`additionalContext` + `systemMessage`)
+  mandatory — a silent rewrite is a contract violation (auditability). Neither
+  note echoes the command (Claude Code already surfaces the rewritten
+  `updatedInput`); the 3a agent note recommends the *wrapped* follow-up form, the
+  3c note names `set -e`, both user notes are terse.
+  The `cd <dir> && <cmd>` matcher (`_CD_AND`/`_cd_and_target`) and the errexit
+  matcher (`_starts_with_errexit`/`_SET_ERREXIT`) are deliberately looser than
+  `_is_cd_to_root` — they parse one shell argument / the first statement's flags —
+  but neither is *security-critical* (a wrong match only subshells or blocks), so
+  neither relaxes the exact-match rule for the root anchor. See `DESIGN.md` →
+  FR5a / FR5c / decisions (i), (l).
 - **`${CLAUDE_PLUGIN_ROOT}` in `hooks.json` is expanded by Claude Code at
   hook-fire time**, not by the shell. Keep it literal.
 - **`plugin.json`'s `.version` is the last released version**; the

@@ -7,8 +7,9 @@ this plugin. Updated as the design evolves.
 directory at project root. It fires a single Python hook
 (`scripts/cwd-safety.py`) on both `PreToolUse(Bash)` and
 `PostToolUse(Bash)`. The pre-use side blocks any command that would cause or
-exploit cwd drift before it runs — or, for the single ergonomic case of a
-`cd <subdir> && <cmd>` issued from root, rewrites it in place to a
+exploit cwd drift before it runs — or, for two ergonomic cases issued from
+root (a `cd <subdir> && <cmd>`, and a `set -e` script with an embedded `cd`),
+rewrites it in place to a
 non-persisting subshell rather than blocking; the post-use side warns after
 drift is detected (a backstop for cases the pre-use gate cannot intercept).
 Together they enforce a hard boundary: the agent executes Bash from project
@@ -88,6 +89,35 @@ caught. This is a narrow drift detector, not a shell parser: a quoted literal
 containing `&& cd` is a known, accepted false positive (it only causes a block).
 The contrived leading form `cd E && cd sub && …` is *not* covered — it satisfies
 FR4 and is allowed (see Limitations). See decision (j).
+
+**FR5c (`set -e` subshell rewrite).** On `PreToolUse`, when `W == E`: a command
+whose **first effective statement** (after any leading blank or `#`-comment
+lines) is a `set` builtin that **enables errexit** — a `-`flag cluster
+containing `e` (`set -e`, `set -eu`, `set -euo pipefail`, `set -ex`) or
+`set -o errexit` — and which would otherwise be blocked by the embedded-cd
+detector (FR5b), is **not** blocked. Instead the hook returns
+`permissionDecision: "allow"` with `hookSpecificOutput.updatedInput` replacing
+the command `C` with `(C)`, scoping the whole script to a non-persisting
+subshell. Rationale: with errexit active *from the first statement*, a failed
+`cd` aborts the subshell before the tail runs — the same cd-first guarantee
+`&&` provides (decision (c)) — so a `;`/newline-separated `set -e` script is as
+safe to subshell as FR5a's `cd <dir> && <cmd>`, and cwd non-persistence is
+guaranteed by the `( … )`. The rewrite is announced on both channels, never
+silent: a dedicated `additionalContext` note names `set -e` and states cwd did
+not persist; `systemMessage` is a terse "wrapped set -e script in a subshell."
+Neither echoes the command (Claude Code surfaces the rewritten `updatedInput`).
+Exclusions, all of which fall through to the FR5b block: the `+` forms
+(`set +e`, `set +o errexit`) and errexit-absent forms (`set -u`,
+`set -o pipefail`, bare `set`) — errexit is not guaranteed before the `cd`; a
+`set` that is *not* the first statement (`foo; set -e; cd x`) — same reason; and
+`setup && …` (matched with `\b`, not mistaken for `set`). It fires only when an
+embedded `cd` is present: a `set -e` script with no `cd` stays allow-silent
+under FR3, untouched. Unlike FR5a it does **not** carve out a cross-root
+`cd $CLAUDE_PROJECT_DIR` while a worktree is active — the embedded-cd detector
+does not parse targets, and the subshell keeps cwd in the worktree regardless (a
+transient command from main, not a persistent transition); a deliberate,
+documented divergence. From a drifted cwd (`W != E`) the same script is still
+blocked (FR6): restore `E` first. See decision (l).
 
 **FR6 (drift block).** On `PreToolUse`: if `W != E` and the command is not
 the root-anchored form (FR4) and does not trigger FR5, the hook blocks with
@@ -464,6 +494,75 @@ not have and the path heuristics decision (h) already refused. (3) Keep the
 shape-2 guard and document `ExitWorktree` as the exit — rejected: `ExitWorktree`
 is a no-op for this session shape, so the documented exit does not exist.
 
+### (l) Rewrite a `set -e` script to a subshell, like `cd <dir> && <cmd>`
+
+**Decision:** At the effective root, a command whose first statement enables
+shell errexit (`set -e` / variant) and that contains an embedded `cd` — which
+FR5b would otherwise block — is rewritten in place to the non-persisting
+subshell `(C)` via a `PreToolUse` `updatedInput` (FR5c), the same treatment
+FR5a gives `cd <dir> && <cmd>`. The `+` forms, errexit-absent `set`, a non-first
+`set`, and the same script from a drifted cwd all remain blocked.
+
+**Rationale:** FR5a rests on `&&`: `cd <dir> && <cmd>` is safe to subshell
+because `&&` guarantees the tail runs only if the `cd` succeeds (decision (c)),
+so a subshell can never run the tail from the wrong cwd. `set -e` provides *the
+same guarantee by a different mechanism*: with errexit active, a failed `cd`
+aborts the script before the tail runs. So the everyday shape
+
+```
+set -e
+cd tools
+make build
+```
+
+is exactly as safe to scope to `(set -e; cd tools; make build)` as
+`cd tools && make build` is — the `;`/newline separators that decision (c)
+rejects for the *root-anchored* form are neutralized here by errexit, precisely
+the way `&&` neutralizes them. cwd non-persistence itself is guaranteed by the
+`( … )`, identical to FR5a; errexit is what makes the *sequential* form safe to
+wrap. Blocking these scripts and making the agent hand-wrap a multi-line script
+into a single `(cd … && …)` chain was the friction FR5a already removed for the
+one-liner; FR5c removes it for the fail-fast-script idiom.
+
+The safety hinge is that errexit must be active *before* the `cd`. The
+sufficient, conservative condition chosen is "`set -e` is the **first**
+statement" (modulo leading blank/comment lines — a shebang-like first line is a
+comment): then every later `cd` is protected. This is stricter than "`set -e`
+appears somewhere before the first `cd`", and deliberately so — it needs no
+position scan and no shell parse, and the failure direction is safe (a `set -e`
+that is not first simply falls through to the FR5b block, and the agent
+re-forms). The errexit matcher is a small regex, not a parser: it inspects only
+the first statement's own options and anchors on `-` so `set +e` cannot pass. As
+with FR5a's `_CD_AND`, a wrong match is not security-critical — it can only
+subshell (still no-persist) or block (agent reissues) — so it does not touch the
+exact-match matcher `_is_cd_to_root` (decision (d)).
+
+Like FR5a this is a command **mutation**, so the same auditability cost applies
+and is paid down the same way: the rewrite is never silent — a dedicated agent
+note (naming `set -e`) and a terse user note both fire, so a follow-up that
+assumed cwd persisted is corrected by context. And like FR5a it fires only from
+`W == E` and only to *replace a block*: a `set -e` script with no `cd` is left
+allow-silent (FR3), unmutated.
+
+**Consciously diverged from FR5a:** the cross-root exclusion is *not* mirrored.
+FR5a refuses to subshell a leading `cd $CLAUDE_PROJECT_DIR` in a worktree
+(decision (i), governed by `ExitWorktree`). FR5c's embedded-cd detector does not
+parse the `cd` target — adding that parse would re-introduce exactly the
+shell-parsing the project avoids — and the divergence is harmless: the wrap is a
+non-persisting subshell, so an embedded `cd <main>` runs one transient command
+from main and cwd returns to the worktree. There is no persistent cross-root
+transition to forbid.
+
+**Alternatives considered:** (1) Require only that `set -e` precede the first
+`cd` (not be first) — rejected: needs an offset scan for a case (`set -e` after
+non-cd setup) rare enough that falling through to the block is fine. (2) Wrap
+*every* `set -e` command, `cd` or not — rejected: needless mutation and a
+notification for scripts FR3 already allows silently, and it would suppress the
+parent shell's own errexit as a side effect. (3) Also honor `set -e` from a
+drifted cwd — rejected: the tail would run from the wrong cwd; restore `E`
+first, as FR5a requires. (4) Mirror FR5a's cross-root exclusion — rejected: it
+needs embedded-target parsing for a case the subshell already makes cwd-safe.
+
 ## Limitations
 
 - **`pushd`/`popd` are not intercepted.** The `_LEADING_CD` regex only matches
@@ -483,6 +582,16 @@ is a no-op for this session shape, so the documented exit does not exist.
   way (inside `$(…)` that escapes to the parent, an aliased/function `cd`) and
   false-positives on a quoted `"&& cd"` literal — the latter only blocks, so it is
   safe if occasionally inconvenient. PostToolUse remains the ultimate backstop.
+
+- **FR5c honors errexit only from the first statement.** A `set -e` reached any
+  other way — a later statement (`foo; set -e; cd x`), an errexit inherited from
+  a caller, or one whose spelling the small matcher does not recognize — is not
+  treated as a wrappable script; it falls through to the FR5b block and the agent
+  re-forms. This is the conservative direction (a missed wrap only blocks). The
+  wrap also does not audit errexit's own escape hatches (a `cd` masked by
+  `|| true`, an `if`, or a pipeline will not abort under `set -e`) — but those
+  are the user's explicit choice and remain cwd-safe, since the wrap is a
+  non-persisting subshell regardless.
 
 - **Single-root only.** The hook is keyed to a single `$CLAUDE_PROJECT_DIR`.
   Multi-root setups (nested worktrees, monorepo sub-roots) are not supported.
@@ -592,3 +701,16 @@ PostToolUse says "guard disabled — restart"), making the trap recoverable for
 is removed — its `ExitWorktree` advice was a dead end and it blocked legitimate
 `cd <main> && git worktree remove <self>` cleanup. The redirect tolerance and
 FR5b from `d8b6a3a` are kept. See decision (k).
+
+**2026-07-17 — wrap `set -e` scripts to a subshell** (this repo). FR5c: a
+command whose first statement enables shell errexit (`set -e` / variant) and
+that carries an embedded `cd` — which FR5b would block — is rewritten in place to
+the non-persisting subshell `(C)`, the same treatment FR5a gives
+`cd <dir> && <cmd>`. `set -e` supplies the identical cd-first fail-fast guarantee
+`&&` does (a failed `cd` aborts before the tail runs), so a fail-fast script is
+as safe to wrap as the one-liner. Narrowly scoped: fires only from `W == E`,
+only when an embedded `cd` is present (no-`cd` scripts stay allow-silent), and
+only when `set -e` is the first statement; excludes `set +e`, errexit-absent
+`set`, and non-first `set`. Announced on both channels with a dedicated
+`set -e`-naming note. Unlike FR5a the worktree cross-root exclusion is not
+mirrored (the subshell keeps cwd in the worktree). See decision (l).

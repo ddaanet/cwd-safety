@@ -295,6 +295,62 @@ check("embedded: `foo | cd x` (pipe subshell) allowed",
 check("embedded: quoted `&& cd` literal blocks (documented false positive)",
       blocked("PreToolUse", ROOT, 'echo "x && cd y"'))
 
+# ── FR5c: a `set -e` script with an embedded `cd` is wrapped in a subshell ─────
+# `set -e` gives the same cd-first fail-fast guarantee as `&&` (a failed `cd`
+# aborts the script before the tail runs), so when errexit is enabled by the
+# command's first statement the whole script is safe to scope to a non-persisting
+# subshell — the FR5a `cd <dir> && <cmd>` idiom generalized. This only *replaces*
+# the FR5b block: it fires only when there is an embedded `cd` to catch.
+check("set-e: `set -e\\ncd t\\nmake` wrapped in subshell",
+      rewritten("PreToolUse", ROOT, "set -e\ncd tools\nmake build",
+                "(set -e\ncd tools\nmake build)"))
+check("set-e: `set -euo pipefail; cd b; make` wrapped in subshell",
+      rewritten("PreToolUse", ROOT, "set -euo pipefail; cd build; make",
+                "(set -euo pipefail; cd build; make)"))
+check("set-e: `set -e && cd sub && ls` wrapped in subshell",
+      rewritten("PreToolUse", ROOT, "set -e && cd sub && ls",
+                "(set -e && cd sub && ls)"))
+check("set-e: `set -o errexit` long form wrapped",
+      rewritten("PreToolUse", ROOT, "set -o errexit\ncd x\nmake",
+                "(set -o errexit\ncd x\nmake)"))
+check("set-e: `set -ex` (errexit + xtrace) wrapped",
+      rewritten("PreToolUse", ROOT, "set -ex\ncd x\nmake", "(set -ex\ncd x\nmake)"))
+check("set-e: leading comment before `set -e` tolerated",
+      rewritten("PreToolUse", ROOT, "# build helper\nset -e\ncd t\nmake",
+                "(# build helper\nset -e\ncd t\nmake)"))
+# The rewrite announcement is tailored to the set -e case (agent note present).
+_c, se_out, _e = run("PreToolUse", ROOT, "set -e\ncd t\nmake")
+se_note = _c == 0 and se_out and "set -e" in json.loads(se_out)["hookSpecificOutput"]["additionalContext"]
+check("set-e: agent note mentions set -e", se_note)
+
+# Exclusions — all fall through to the FR5b block (errexit not guaranteed before cd).
+check("set-e: `set +e` (errexit disabled) blocked, not wrapped",
+      blocked("PreToolUse", ROOT, "set +e\ncd x\nmake"))
+check("set-e: `set -u` (no errexit) blocked, not wrapped",
+      blocked("PreToolUse", ROOT, "set -u\ncd x\nmake"))
+check("set-e: `set -o pipefail` (no errexit) blocked, not wrapped",
+      blocked("PreToolUse", ROOT, "set -o pipefail\ncd x\nmake"))
+check("set-e: bare `set` (prints vars, no errexit) blocked, not wrapped",
+      blocked("PreToolUse", ROOT, "set\ncd x\nmake"))
+check("set-e: `set -e` not first statement blocked, not wrapped",
+      blocked("PreToolUse", ROOT, "foo\nset -e\ncd x\nmake"))
+check("set-e: `setup && cd x` not treated as `set` (word boundary)",
+      blocked("PreToolUse", ROOT, "setup && cd x && make"))
+# No embedded cd: the set -e script is left alone (allow-silent, not wrapped).
+check("set-e: `set -e\\nmake\\nmake test` (no cd) allowed silently",
+      allowed("PreToolUse", ROOT, "set -e\nmake\nmake test"))
+# From a drifted cwd the same script is blocked — restore the root first.
+check("set-e: drifted `set -e\\ncd x` blocked (restore first)",
+      blocked("PreToolUse", SUB, "set -e\ncd x\nmake"))
+# Worktree: wrapped uniformly, including an embedded cd to the main repo (the
+# subshell keeps cwd in the worktree — no cross-root carve-out, unlike FR5a).
+check("set-e wt: `set -e\\ncd src\\nmake` at wt root wrapped",
+      rewritten("PreToolUse", WT, "set -e\ncd src\nmake",
+                "(set -e\ncd src\nmake)", root=PROJ))
+check("set-e wt: embedded `cd MAIN` in a set -e script still wrapped",
+      rewritten("PreToolUse", WT, f"set -e\ncd {PROJ}\ngit log",
+                f"(set -e\ncd {PROJ}\ngit log)", root=PROJ))
+
 # ── FR: $CLAUDE_PROJECT_DIR is itself a linked worktree → treated as a plain root ─
 # The shape-2 self-destruct guard was removed: its `ExitWorktree` advice was a
 # dead end (that tool is a no-op for a background worktree session it did not
