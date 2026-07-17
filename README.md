@@ -28,17 +28,20 @@ current working directory `W`:
 | At root (`W == E`), command isn't a `cd` | **allow** silently |
 | `cd E` or `cd E && <cmd>` (root-anchored) | **allow** from anywhere |
 | At root (`W == E`), `cd <subdir> && <cmd>` | **rewrite** to a subshell `(cd <subdir> && <cmd>)`, then allow |
+| At root (`W == E`), a `set -e` script whose first statement enables errexit, with an embedded `cd` | **rewrite** the whole script to a subshell `(<script>)`, then allow |
 | Any other leading `cd` (bare `cd subdir`, `cd ..`, `cd -`, `;`/`\|\|` tails) | **block** — even at root |
 | Drifted (`W != E`), any other command | **block**, with the restore command |
 | `PostToolUse` and drifted (`W != E`) | **warn** (agent + user channels) |
 
 The pre-use side stops drift *before* it happens — a bare `cd <subdir>`
-is the most common cause, so it's refused outright, even from root. The one
-ergonomic exception is at root: a `cd <subdir> && <cmd>` is rewritten in
-place to a non-persisting subshell `(cd <subdir> && <cmd>)` and allowed
-(announced on both channels), sparing the agent a block-then-reissue turn
-without letting cwd move. The post-use side is a backstop that warns after
-drift the pre-use gate can't intercept (e.g. `pushd`).
+is the most common cause, so it's refused outright, even from root. The
+ergonomic exceptions are both at root: a `cd <subdir> && <cmd>`, and a
+`set -e` script with an embedded `cd` (errexit makes a failed `cd` abort
+the script, the same cd-first guarantee `&&` gives), are each rewritten in
+place to a non-persisting subshell and allowed (announced on both
+channels), sparing the agent a block-then-reissue turn without letting cwd
+move. The post-use side is a backstop that warns after drift the pre-use
+gate can't intercept (e.g. `pushd`).
 
 ### Worktrees
 
