@@ -1,6 +1,6 @@
 {
   "name": "cwd-safety",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Keeps the agent's Bash working directory at project root. A PreToolUse(Bash) hook blocks drift-inducing `cd` commands and any command run from a drifted cwd; a PostToolUse(Bash) hook warns when the working directory has changed.",
   "author": {
     "name": "David Allouche",
