@@ -7,13 +7,15 @@ _default:
     @just --list
 
 # Lint manifests + hooks.json, byte-compile the hook, run the test suite.
-# The imported `release` recipe depends on this name.
 precommit:
     jq . .claude-plugin/plugin.json > /dev/null
     jq . hooks/hooks.json > /dev/null
     python3 -m py_compile scripts/cwd-safety.py tests/test_cwd_safety.py
     python3 tests/test_cwd_safety.py
     @echo "ok"
+
+# The gate `release` depends on; identical to precommit for this plugin.
+prerelease: precommit
 
 # Run the hook test suite.
 test:
