@@ -6,7 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A Claude Code plugin: a dual-mode `PreToolUse(Bash)` / `PostToolUse(Bash)`
 hook that keeps the agent's working directory at project root. See
-`DESIGN.md` for the full requirements, decisions, and history.
+`docs/design.md` for the full requirements and decisions, and
+`docs/changelog.md` for how they got that way.
 
 ## Layout
 
@@ -21,6 +22,16 @@ hook that keeps the agent's working directory at project root. See
 - `tests/test_cwd_safety.py` — drives the hook as a subprocess with
   crafted JSON, asserting exit code and streams for every contract rule.
   Stdlib only (no pytest).
+- `docs/design.md` — living rationale for every design decision (FR/NFR list,
+  decisions (a)–(l), limitations). States what the plugin *is*, in the present
+  tense. When a decision is overturned it is rewritten here in place — never
+  struck through, never annotated with "formerly".
+- `docs/changelog.md` — index of write-time records, newest first, one line per
+  entry. Bodies live in `docs/changelog/YYYY-MM-DD-slug.md` and are **never
+  revised**: a dated record is correct forever precisely because it is dated.
+- `plans/` — specs and implementation plans. Prospective content only (work not
+  yet done, or how something was built rather than what it is); `docs/` holds
+  what is true now.
 - `plugin-dev/` — vendored `claude-plugin-dev` toolkit (release recipe +
   version-guard hook). Do not edit by hand; update with
   `just update-plugin-dev vX.Y.Z`.
@@ -40,7 +51,7 @@ and runs the test suite. Must be green before committing.
 
 ## The behavioral contract
 
-Canonical statement lives in `DESIGN.md` (FR1–FR9). In short, at
+Canonical statement lives in `docs/design.md` (FR1–FR9). In short, at
 `PreToolUse(Bash)` with **effective root `E`** (the enclosing git-worktree root
 when `cwd` is inside a worktree of `$CLAUDE_PROJECT_DIR`, detected from the
 on-disk `.git` linkage, else `$CLAUDE_PROJECT_DIR` — including when
@@ -49,7 +60,7 @@ root) and cwd `W`:
 
 0. **`E` does not exist on disk** (deleted out from under the session) → **fail
    open**: allow every command silently, before all rules below. `PostToolUse`
-   then says the guard is disabled — restart the session. See `DESIGN.md` →
+   then says the guard is disabled — restart the session. See `docs/design.md` →
    FR7a / decision (k).
 
 1. `W == E` and `C` is not a `cd` → allow silently.
@@ -64,14 +75,14 @@ root) and cwd `W`:
      <cmd>)` via `PreToolUse` `updatedInput` and allowed, with a mandatory
      dual-channel announcement — instead of blocked. Bare `cd <subdir>`,
      `;`/`||`, a cross-root `cd $CLAUDE_PROJECT_DIR` in a worktree, and the
-     same command from drift all still block. See `DESIGN.md` → FR5a /
+     same command from drift all still block. See `docs/design.md` → FR5a /
      decision (i).
    - **3b.** *Also when `W == E`:* a non-leading `cd` that runs in the current
      shell right after a top-level separator (`mkdir … && cd sub && …`,
      `echo x; cd sub`) is **blocked** (FR5b). The `cd` must immediately follow the
      separator, so `(cd sub && …)` subshells and `foo | cd sub` pipelines are not
      caught; a quoted `"&& cd"` literal is a known, block-only false positive. See
-     `DESIGN.md` → FR5b / decision (j).
+     `docs/design.md` → FR5b / decision (j).
    - **3c.** *Exception to 3b, only when `W == E`:* if that command's **first
      statement enables errexit** (`set -e` / `set -euo pipefail` / `set -o
      errexit`), the whole script is **rewritten** to the non-persisting subshell
@@ -79,7 +90,7 @@ root) and cwd `W`:
      same cd-first fail-fast guarantee as `&&`, so a failed `cd` aborts before the
      tail runs. Excludes `set +e`, errexit-absent `set`, and a non-first `set`.
      Unlike 3a there is **no** worktree cross-root carve-out (the subshell keeps
-     cwd in the worktree). See `DESIGN.md` → FR5c / decision (l).
+     cwd in the worktree). See `docs/design.md` → FR5c / decision (l).
 4. `W != E`, any other command → block with the `cd E` restore hint.
 
 At `PostToolUse(Bash)`: if `E` is gone, emit the fail-open "guard disabled —
@@ -94,10 +105,10 @@ the drift warning on both `hookSpecificOutput.additionalContext` and
   only event-specific code.
 - **Only `&&` is accepted after a root-anchored `cd`.** `;` and `||`
   break the cd-first invariant (`cmd` would run even if the `cd` failed).
-  `_is_cd_to_root` enforces this — don't loosen the regex. See `DESIGN.md`
+  `_is_cd_to_root` enforces this — don't loosen the regex. See `docs/design.md`
   → decision (c).
 - **Exact path match only.** No `normpath`/`realpath`/prefix matching —
-  normalization opens substitution attacks. See `DESIGN.md` → decision
+  normalization opens substitution attacks. See `docs/design.md` → decision
   (d). The trade-off is a known sharp edge: a trailing slash or symlinked
   `$CLAUDE_PROJECT_DIR` won't match.
 - **Block messages go to stderr with exit 2; the PostToolUse warning is
@@ -119,7 +130,7 @@ the drift warning on both `hookSpecificOutput.additionalContext` and
   matcher (`_starts_with_errexit`/`_SET_ERREXIT`) are deliberately looser than
   `_is_cd_to_root` — they parse one shell argument / the first statement's flags —
   but neither is *security-critical* (a wrong match only subshells or blocks), so
-  neither relaxes the exact-match rule for the root anchor. See `DESIGN.md` →
+  neither relaxes the exact-match rule for the root anchor. See `docs/design.md` →
   FR5a / FR5c / decisions (i), (l).
 - **`${CLAUDE_PLUGIN_ROOT}` in `hooks.json` is expanded by Claude Code at
   hook-fire time**, not by the shell. Keep it literal.
@@ -131,7 +142,7 @@ the drift warning on both `hookSpecificOutput.additionalContext` and
   it into both handlers. `_worktree_root` walks up `cwd` and reads the `.git`
   linkage to recognize a worktree of the project — there is no payload field for
   this. Read-only filesystem access; the `cd E` match stays exact. See
-  `DESIGN.md` → decision (h).
+  `docs/design.md` → decision (h).
 
 ## Non-goals
 
@@ -142,7 +153,7 @@ the drift warning on both `hookSpecificOutput.additionalContext` and
   config surface, no allow-list of subdirectories.
 - **A git-hook variant.** The guard operates on Claude Code's Bash tool
   calls, which only `PreToolUse`/`PostToolUse` expose. Git hooks fire on
-  git operations and can't see the agent's cwd. See `DESIGN.md` →
+  git operations and can't see the agent's cwd. See `docs/design.md` →
   decision (f).
 
 ## Releasing

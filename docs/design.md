@@ -1,7 +1,8 @@
 # cwd-safety — Design
 
-Living document. Captures the rationale, requirements, and decisions behind
-this plugin. Updated as the design evolves.
+Living design document. States what the plugin *is* and why it has this shape.
+Present tense throughout: when a decision is overturned it is rewritten here in
+place, and the reversal gets a dated entry in [changelog.md](changelog.md).
 
 `cwd-safety` is a Claude Code plugin that keeps the agent's Bash working
 directory at project root. It fires a single Python hook
@@ -191,16 +192,13 @@ the plugin is installed in the user's plugin cache.
 
 **Decision:** Block (exit 2) on PreToolUse, not merely warn.
 
-**Rationale:** A warn-only hook was the original design (commit `a8d6355`).
-Warnings were ignored in practice: the agent continued issuing commands from a
-drifted cwd, compounding the confusion. Commit `0d985a2` ("implement
-dual-mode enforcement") replaced warn-at-PreToolUse with block. The
-requirement that drove this change is stated in the hook's module docstring:
-"read-only commands from wrong cwd actively mislead the agent about context."
-A misleading read (e.g., `git status` from inside a submodule) is not
-harmless; it produces incorrect information that the agent treats as
-authoritative. Hard block eliminates the failure mode entirely rather than
-attenuating it.
+**Rationale:** Warnings are ignored in practice — the agent continues issuing
+commands from a drifted cwd and compounds the confusion. The requirement that
+drives the block is stated in the hook's module docstring: "read-only commands
+from wrong cwd actively mislead the agent about context." A misleading read
+(e.g., `git status` from inside a submodule) is not harmless; it produces
+incorrect information that the agent treats as authoritative. A hard block
+eliminates the failure mode entirely rather than attenuating it.
 
 **Alternatives considered:** Emit a warning and allow. Rejected because the
 agent reliably ignored non-blocking warnings and proceeded to accumulate
@@ -211,14 +209,12 @@ confusion.
 **Decision:** Block any `cd` command that is not the sanctioned root-anchored
 form, including when `W == R`.
 
-**Rationale:** The original hook (commit `0d985a2`) only blocked non-root-form
-commands when `W != R`. A bare `cd subdir` issued from project root would have
-been allowed, causing drift that the PostToolUse warn would then catch. The
-new rule (FR5) intercepts the drift before it happens. The leading-`cd`
-pattern is the most common cause of drift, so stopping it unconditionally
-(whether `W == R` or not) removes the most common failure path outright. The
-PostToolUse warn remains as a backstop for paths the PreToolUse gate cannot
-intercept (e.g., `pushd`).
+**Rationale:** Blocking only when `W != R` would allow a bare `cd subdir` issued
+from project root, causing drift that the PostToolUse warn then catches after the
+fact. FR5 intercepts the drift before it happens. The leading-`cd` pattern is the
+most common cause of drift, so stopping it unconditionally (whether `W == R` or
+not) removes the most common failure path outright. The PostToolUse warn remains
+as a backstop for paths the PreToolUse gate cannot intercept (e.g., `pushd`).
 
 **Alternatives considered:** Allow `cd subdir` from root and rely on
 PostToolUse warn. Rejected: the agent then executes at least one command
@@ -236,8 +232,8 @@ run. `;` provides no such guarantee: `cmd` runs even if `cd R` fails, meaning
 the hook could be spoofed by constructing a `cd <path>` that matches the regex
 but points to a wrong location. `||` has the opposite semantics (run `cmd` if
 `cd` fails), which makes no sense as a safety form. The choice is stated
-explicitly in `scripts/cwd-safety.py`'s module docstring and in the original
-commit `d2a3ecd` that introduced the `_is_cd_to_root` regex.
+explicitly in `scripts/cwd-safety.py`'s module docstring, alongside the
+`_is_cd_to_root` regex that enforces it.
 
 **Alternatives considered:** Accept `;` for ergonomics. Rejected: breaks the
 security invariant; the agent can always use `&&` instead.
@@ -268,11 +264,9 @@ is no evidence the exact match causes practical problems.
 know will drift. `pushd`, for example, is not detected by `_LEADING_CD`. The
 PostToolUse handler is a backstop: it detects drift after the fact and warns,
 leaving the agent aware that the next PreToolUse command will be blocked until
-it restores cwd. The dual-mode design was introduced in commit `0d985a2`
-("implement dual-mode enforcement") as a deliberate choice to handle the case
-where PreToolUse blocks cannot be complete. The subsequent commit `618616b`
-("Make hook messages visible to both agent and user") ensured the PostToolUse
-warning reached both channels.
+it restores cwd. Dual-mode is a deliberate concession that PreToolUse blocks
+cannot be complete, and the warning reaches both channels (NFR5) so neither
+agent nor user is blind to drift the gate let through.
 
 **Alternatives considered:** PreToolUse only, with an exhaustive list of
 drift-inducing commands to block. Rejected: the list cannot be complete
@@ -300,13 +294,12 @@ Bash tool calls, so they do not cover the failure mode.
 **Decision:** The standalone plugin is named `cwd-safety`, not
 `submodule-safety`.
 
-**Rationale:** The original name (`submodule-safety.py`) reflected the
-specific trigger that motivated the hook's creation: agents drifting into git
-submodule directories. The hook was quickly generalized (commit `1841810`) to
-cover any cwd drift, not only submodule descent. The name `submodule-safety`
-was already a
-misnomer in the agent-core era. Extracting the hook into a standalone plugin
-was the natural point to rename it to match what it actually does.
+**Rationale:** The original name (`submodule-safety.py`) reflected the specific
+trigger that motivated the hook's creation: agents drifting into git submodule
+directories. The hook was generalized within a day to cover any cwd drift, not
+only submodule descent, so the name was a misnomer for its entire life in
+agent-core. Extracting the hook into a standalone plugin was the natural point to
+rename it to match what it actually does.
 
 **Alternatives considered:** Keep the name for continuity. Rejected: the name
 actively misleads about the scope of the guard.
@@ -341,8 +334,8 @@ This decision governs the shape where `cwd` sits *inside* a worktree of
 `$CLAUDE_PROJECT_DIR`. The mirror shape — `$CLAUDE_PROJECT_DIR` set to the
 worktree path *itself* (a background worktree session) — is deliberately *not*
 special-cased here: `_worktree_root` finds no enclosing worktree, so `E` is that
-path and it is governed as a plain root. See decision (k) for why the earlier
-`_worktree_main_root` special-case was removed.
+path and it is governed as a plain root. See decision (k) for why special-casing
+it is wrong.
 
 **Alternatives considered:** (1) Trust a `worktree` payload field — rejected, it
 does not exist. (2) `.claude/worktrees/` path convention — rejected, arbitrary
@@ -419,8 +412,7 @@ tolerate shell redirections between the `cd` target and the `&&`. (2) An embedde
 `cd` running in the current shell right after a top-level separator (FR5b) is
 blocked, even though `cd` is not the command's leading token.
 
-**Rationale:** Both come straight from session `5935efe7`, where the agent, once
-its cwd was deleted, repeatedly wrote natural forms the matchers mishandled.
+**Rationale:** Both address natural command forms the matchers mishandled.
 `cd <dir> 2>&1 && <cmd>` — capturing the `cd`'s own diagnostics — was blocked
 because a redirection sat between the path and the `&&`; yet a redirection cannot
 change the cd-first guarantee `&&` provides (the tail still runs only if `cd`
@@ -460,31 +452,31 @@ disabled — restart" notice (FR7a). (2) The `_worktree_main_root` special-case
 worktree, blocking `cd <main>` in favor of `ExitWorktree`) is removed; that shape
 is now governed as a plain root.
 
-**Rationale:** Both come from the aftermath of session `5935efe7`, where a
-background worktree session ran `cd <main> && git worktree remove --force <self>`,
-deleting its own cwd. The shell fell back to the main repo, but `E` still pointed
-at the now-gone worktree, so every command hit the FR6 drift block, the `cd E`
-restore no-oped (target gone), and the Bash tool deadlocked. The guard's whole
-contract is "keep cwd at `E`"; once `E` is gone that contract is meaningless, and
+**Rationale:** Both address the self-destruct trap: a background worktree session
+runs `cd <main> && git worktree remove --force <self>` and deletes its own cwd.
+The shell falls back to the main repo, but `E` still points at the now-gone
+worktree, so every command hits the FR6 drift block, the `cd E` restore no-ops
+(target gone), and the Bash tool deadlocks. The guard's whole contract is "keep
+cwd at `E`"; once `E` is gone that contract is meaningless, and
 the only coherent behavior is to step aside. Fail-open covers *every* deletion
 vector — self-removal, another session's `git worktree remove`, `git worktree
 prune`, an external `rm` — because it keys on the on-disk fact, not the mechanism.
 
-The `_worktree_main_root` guard was added earlier to *prevent* this trap by
-blocking the self-`cd <main>`. But its advice was a dead end: `ExitWorktree` is a
-no-op for a background worktree session (it only exits a worktree the current
-session created via `EnterWorktree`), so the guard steered the agent to a tool
-that does nothing while blocking the one working cleanup path
+A `_worktree_main_root` guard once tried to *prevent* this trap by blocking the
+self-`cd <main>`. Its advice was a dead end: `ExitWorktree` is a no-op for a
+background worktree session (it only exits a worktree the current session created
+via `EnterWorktree`), so the guard steered the agent to a tool that does nothing
+while blocking the one working cleanup path
 (`cd <main> && git worktree remove <self>`). Once fail-open makes the trap
-survivable, the guard only forbids legitimate post-merge cleanup, so it is
-removed. The shape then behaves as a plain root: `cd <main> && …` is a benign
+survivable, such a guard only forbids legitimate post-merge cleanup, so there is
+none. The shape behaves as a plain root: `cd <main> && …` is a benign
 non-persisting subshell rewrite, and drift blocks with a plain `cd <E>` hint.
 
 **Consciously re-accepted:** an *accidental* self-destruct is no longer
 hard-blocked. Mitigations: `git worktree remove` refuses a dirty worktree without
-`--force`; `--force` is an explicit opt-in to destruction; the incident's real
-safety was the agent asking the user first; cwd-safety was never a data-loss
-guard; and fail-open makes the outcome recoverable regardless.
+`--force`; `--force` is an explicit opt-in to destruction; the real safety in
+practice is the agent asking the user before a destructive cleanup; cwd-safety was
+never a data-loss guard; and fail-open makes the outcome recoverable regardless.
 
 **Alternatives considered:** (1) Allow a narrow `mkdir -p E && cd E` restore —
 rejected: it recreates a hollow non-git directory, and the shell is *already* at a
@@ -613,104 +605,8 @@ needs embedded-target parsing for a case the subshell already makes cwd-safe.
   This is intended — a worktree session that removed its own worktree is winding
   down at the main repo — and the PostToolUse notice tells the human to restart to
   re-establish a valid root.
-
 ## History
 
-**2026-01-30 — born as `hooks/submodule-safety.py` in agent-core** (commit
-`a8d6355`, "Fix TDD workflow and handoff quality issues"). Original scope:
-warn on git operations that reference submodule paths, or that are issued
-while inside a submodule. Wired as a PreToolUse warn-only hook.
-
-**2026-01-30 — broadened to ANY non-root cwd** (commit `1841810`, "Fix hooks
-and add production artifact vet requirement"). Submodule-specific detection
-dropped; the hook now warns on any Bash command when `cwd != project root`.
-
-**2026-01-31 — dual-mode, hard block** (commit `0d985a2`, "Update hook config
-and implement dual-mode enforcement"). Warn-at-PreToolUse replaced by block
-(exit 2). PostToolUse warn added as backstop. Both changes driven by
-observation that non-blocking warnings were ignored. Root-anchored `cd R`
-allowed as an escape hatch.
-
-**2026-01-31 — dual-channel messaging** (commit `618616b`, "Make hook messages
-visible to both agent and user"). PostToolUse warnings extended to include
-`systemMessage` alongside `hookSpecificOutput.additionalContext`, so both the
-agent context stream and the user's terminal sidebar see the warning.
-
-**2026-02-02 — linter cleanup** (commit `d243fad`, "Fix linter warnings in
-hook scripts"). Docstring reformatted per ruff D205; line length corrected per
-E501. No behavioral change.
-
-**2026-02-16 — `cd R && cmd` pattern allowed** (commit `d2a3ecd`, "Allow
-cd <root> && <cmd> pattern in submodule-safety hook"). The exact-match restore
-list replaced by `_is_cd_to_root()` regex; only `&&` accepted as separator
-(not `;` or `||`). Security note added to the docstring.
-
-**2026-05-23 — agent-core teardown** (commit `99920f4`, "Tear down workflow
-pipeline; keep skills bundle + CLI-backing scripts"). The hooks (including
-`submodule-safety.py`) were removed along with the rest of the workflow
-pipeline. Ecosystem replaced by superpowers + autoMemory. The hook had been
-symlinked into `/Users/david/code/home/.claude/hooks/submodule-safety.py`
-(since commit `e065fbb`, 2026-02-02) and into
-`/Users/david/code/devddaanet/.claude/hooks/submodule-safety.py` (since
-commit `b7e48cd`). Both symlinks were removed in their respective repos on
-2026-04-02 when agent-core was replaced by the edify marketplace plugin
-(`38166be` and `1a70e58`).
-
-**2026-06 — extracted and hardened as `cwd-safety` plugin** (this repo).
-Hook renamed to match its actual scope. Rule 3 (proactive leading-cd block,
-even from root) added. Script relocated to `scripts/cwd-safety.py`; wired via
-`hooks/hooks.json` using `${CLAUDE_PLUGIN_ROOT}` for portability.
-
-**2026-06 — honor git worktrees** (this repo). The hook now anchors to the
-enclosing git-worktree root as a single effective root, detected from the
-on-disk `.git` linkage (there is no worktree hook-payload field — verified
-empirically), falling back to `$CLAUDE_PROJECT_DIR` otherwise. `cd` back to
-main while a worktree is active is blocked in favor of `ExitWorktree`; block and
-warn messages are worktree-aware. See decision (h).
-
-**2026-06-12 — rewrite `cd <subdir> && <cmd>` to a subshell** (this repo).
-`PreToolUse` `updatedInput` is used to rewrite a `cd <path> && <rest>` issued
-from the effective root into the non-persisting `(cd <path> && <rest>)`, rather
-than blocking and making the agent reissue it (FR5a). Free on the security axis
-(the subshell preserves the no-persistence invariant); the cost is command
-mutation, paid down by a mandatory dual-channel announcement. Narrowly scoped:
-fires only from `W == E`, requires an `&&` tail and a path, excludes `;`/`||`
-and (in a worktree) a cross-root `cd $CLAUDE_PROJECT_DIR`. See decision (i).
-
-**2026-07-12 — redirect tolerance, embedded-cd block, CPD-is-worktree guard**
-(this repo). Debugging session `5935efe7` (a background worktree session with
-`$CLAUDE_PROJECT_DIR` set to the worktree path) surfaced three defects, all fixed
-here: (1) FR4/FR5a now tolerate redirections between the `cd` target and the `&&`
-(`cd E 2>&1 && …`), which the matchers previously rejected; (2) a new FR5b blocks
-an embedded `cd` after a top-level separator (`mkdir … && cd sub && …`) instead of
-letting it drift; (3) `_worktree_main_root` recognizes a `$CLAUDE_PROJECT_DIR`
-that is itself a linked worktree, so a `cd` to the main repo is blocked
-(`ExitWorktree`) rather than subshelled — which in that session had let the agent
-`git worktree remove` its own cwd and become trapped. See decision (j) and the
-decision (h) extension.
-
-**2026-07-13 — fail open on a deleted root; drop the shape-2 guard** (this repo).
-Examining the `5935efe7` transcript showed the self-destruct trap was worse than
-the previous entry's fix assumed: after the worktree was removed the shell fell
-back to the main repo but `E` stayed pinned to the gone worktree, the `cd E`
-restore no-oped, and the Bash tool deadlocked — and `ExitWorktree` (the guard's
-advice) is a no-op for a background worktree session. Two changes: (1) FR7a —
-when `E` no longer exists on disk the hook fails open (PreToolUse allows all;
-PostToolUse says "guard disabled — restart"), making the trap recoverable for
-*any* deletion vector; (2) the `_worktree_main_root` shape-2 guard from `d8b6a3a`
-is removed — its `ExitWorktree` advice was a dead end and it blocked legitimate
-`cd <main> && git worktree remove <self>` cleanup. The redirect tolerance and
-FR5b from `d8b6a3a` are kept. See decision (k).
-
-**2026-07-17 — wrap `set -e` scripts to a subshell** (this repo). FR5c: a
-command whose first statement enables shell errexit (`set -e` / variant) and
-that carries an embedded `cd` — which FR5b would block — is rewritten in place to
-the non-persisting subshell `(C)`, the same treatment FR5a gives
-`cd <dir> && <cmd>`. `set -e` supplies the identical cd-first fail-fast guarantee
-`&&` does (a failed `cd` aborts before the tail runs), so a fail-fast script is
-as safe to wrap as the one-liner. Narrowly scoped: fires only from `W == E`,
-only when an embedded `cd` is present (no-`cd` scripts stay allow-silent), and
-only when `set -e` is the first statement; excludes `set +e`, errexit-absent
-`set`, and non-first `set`. Announced on both channels with a dedicated
-`set -e`-naming note. Unlike FR5a the worktree cross-root exclusion is not
-mirrored (the subshell keeps cwd in the worktree). See decision (l).
+Write-time records of each change — what moved and the reasoning available at
+the time — live in [changelog.md](changelog.md), one file per entry. This
+document states what the plugin *is*; the changelog states how it got there.

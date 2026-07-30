@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3 stdlib only (`json`, `os`, `re`, `sys`). Tests: stdlib subprocess driver + real temp `.git` fixtures (no pytest). Gate: `just precommit`.
 
-**Spec:** `docs/superpowers/specs/2026-06-07-cwd-safety-worktree-design.md`
+**Spec:** `plans/2026-06-07-cwd-safety-worktree-design.md`
 
 ---
 

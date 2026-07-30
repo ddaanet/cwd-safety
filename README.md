@@ -90,7 +90,8 @@ written — disabling the plugin removes the hook with it.
   enclosing worktree of it. Worktrees are recognized; unrelated repos and
   arbitrary multi-root setups are not.
 
-See `DESIGN.md` for the full requirements, decisions, and history.
+See `docs/design.md` for the full requirements and decisions, and
+`docs/changelog.md` for how they got that way.
 
 ## License
 

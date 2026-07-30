@@ -100,7 +100,7 @@ def _is_under(path: str, parent: str) -> bool:
     """True if ``path`` equals ``parent`` or sits inside it.
 
     String containment only — no symlink/realpath resolution (the exact-match
-    principle of DESIGN.md decision (d) is preserved for the cd match; this is
+    principle of docs/design.md decision (d) is preserved for the cd match; this is
     only used to confirm a worktree's gitdir belongs to the project).
     """
     parent = parent.rstrip(os.sep)
