@@ -22,10 +22,10 @@ test:
     python3 tests/test_cwd_safety.py
 
 # Drive the hook once by hand from a chosen cwd.
-#   just probe PreToolUse /some/cwd 'cd subdir && ls'
-# CLAUDE_PROJECT_DIR defaults to this repo root.
 probe event cwd command='':
     #!/usr/bin/env bash
+    # just probe PreToolUse /some/cwd 'cd subdir && ls'
+    # CLAUDE_PROJECT_DIR defaults to this repo root.
     set -euo pipefail
     root="$(git rev-parse --show-toplevel)"
     json=$(jq -cn --arg e "{{event}}" --arg w "{{cwd}}" --arg c "{{command}}" \
