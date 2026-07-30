@@ -1,6 +1,10 @@
 *.pyc
 __pycache__/
+
+# macOS Finder cruft. `._*` are AppleDouble sidecars, written whenever the
+# tree is touched from a non-HFS volume (network share, USB, some backups).
 .DS_Store
+._*
 
 .claude/settings.local.json
 .claude/handoff-session
