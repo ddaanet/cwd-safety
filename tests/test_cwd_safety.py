@@ -126,20 +126,20 @@ def rewritten(event, cwd, command, expected_cmd, root=ROOT):
     )
 
 
-# ── Rule 1: at root, non-cd commands pass silently ──────────────────────────
+# ── FR3: at root, non-cd commands pass silently ─────────────────────────────
 check("at root: `ls` allowed", allowed("PreToolUse", ROOT, "ls -la"))
 check("at root: pipeline allowed", allowed("PreToolUse", ROOT, "git status | head"))
 check("at root: subshell cd allowed", allowed("PreToolUse", ROOT, "(cd subdir && ls)"))
 check("at root: `lcd` not treated as cd", allowed("PreToolUse", ROOT, "lcd foo"))
 
-# ── Rule 2: the root-anchored form is always allowed ────────────────────────
+# ── FR4: the root-anchored form is always allowed ───────────────────────────
 check("bare `cd ROOT` allowed at root", allowed("PreToolUse", ROOT, f"cd {ROOT}"))
 check("`cd ROOT && ls` allowed at root", allowed("PreToolUse", ROOT, f"cd {ROOT} && ls"))
 check('`cd "ROOT"` (quoted) allowed', allowed("PreToolUse", ROOT, f'cd "{ROOT}"'))
 check("`cd ROOT` restores from drift", allowed("PreToolUse", SUB, f"cd {ROOT}"))
 check("`cd ROOT && cmd` runs from drift", allowed("PreToolUse", SUB, f"cd {ROOT} && pytest"))
 
-# ── Rule 3: drift-inducing `cd` blocked even at root ────────────────────────
+# ── FR5: drift-inducing `cd` blocked even at root ───────────────────────────
 check("at root: `cd subdir` blocked", blocked("PreToolUse", ROOT, "cd subdir"))
 check("at root: `cd ..` blocked", blocked("PreToolUse", ROOT, "cd .."))
 check("at root: `cd /tmp` blocked", blocked("PreToolUse", ROOT, "cd /tmp"))
@@ -147,7 +147,7 @@ check("at root: `cd -` blocked", blocked("PreToolUse", ROOT, "cd -"))
 check("`cd ROOT; ls` blocked (only && allowed)", blocked("PreToolUse", ROOT, f"cd {ROOT}; ls"))
 check("`cd ROOT || ls` blocked (only && allowed)", blocked("PreToolUse", ROOT, f"cd {ROOT} || ls"))
 
-# ── Rule 3a: at root, `cd <subdir> && <cmd>` is rewritten to a non-persisting
+# ── FR5a: at root, `cd <subdir> && <cmd>` is rewritten to a non-persisting
 #    subshell instead of blocked — saves the agent a turn, keeps cwd at root ──
 check("at root: `cd subdir && ls` rewritten to subshell",
       rewritten("PreToolUse", ROOT, "cd subdir && ls", "(cd subdir && ls)"))
@@ -179,11 +179,11 @@ check("at root: bare `cd && ls` (no path) still blocked",
 check("drifted: `cd deeper && ls` blocked, not rewritten (restore first)",
       blocked("PreToolUse", SUB, "cd deeper && ls"))
 
-# ── Rule 4: from a drifted cwd, other commands are blocked ──────────────────
+# ── FR6: from a drifted cwd, other commands are blocked ─────────────────────
 check("drifted: `ls` blocked", blocked("PreToolUse", SUB, "ls"))
 check("drifted: `cd deeper` blocked", blocked("PreToolUse", SUB, "cd deeper"))
 
-# ── Rule 5: PostToolUse warns only when drifted ─────────────────────────────
+# ── FR7: PostToolUse warns only when drifted ────────────────────────────────
 code, out, _err = run("PostToolUse", ROOT, "ls")
 check("PostToolUse at root: silent, exit 0", code == 0 and out == "")
 

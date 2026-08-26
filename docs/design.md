@@ -82,7 +82,7 @@ the wrong cwd would run the tail from the wrong cwd.
 **FR5b (embedded-cd block).** On `PreToolUse`, when `W == E`: a command that is
 not itself a leading `cd` but contains a `cd` running in the current shell right
 after a top-level sequencing operator (`&&`, `||`, `;`, `&`, or a newline) — e.g.
-`mkdir -p tools && cd tools && …`, `echo hi; cd sub` — is blocked with the Rule 5
+`mkdir -p tools && cd tools && …`, `echo hi; cd sub` — is blocked with the FR5
 message (which recommends the `(cd sub && …)` subshell form). The `cd` must
 *immediately* follow the separator, so a `(cd sub && …)` subshell and a
 `foo | cd sub` pipeline (single `|`, its `cd` runs in a subshell) are never
@@ -204,7 +204,7 @@ eliminates the failure mode entirely rather than attenuating it.
 agent reliably ignored non-blocking warnings and proceeded to accumulate
 confusion.
 
-### (b) Proactive cd block — rule 3, even at project root
+### (b) Proactive cd block — FR5, even at project root
 
 **Decision:** Block any `cd` command that is not the sanctioned root-anchored
 form, including when `W == R`.

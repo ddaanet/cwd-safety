@@ -254,7 +254,7 @@ def _block(message: str) -> None:
     sys.exit(2)
 
 
-# Rule 3a announcements. The rewrite is never silent, but neither channel echoes
+# FR5a announcements. The rewrite is never silent, but neither channel echoes
 # the command: Claude Code already surfaces the rewritten command (updatedInput),
 # so echoing it again is bloat. The agent note recommends the *wrapped* form for
 # follow-ups — recommending the unwrapped `cd <dir> && <cmd>` would just trigger
@@ -268,7 +268,7 @@ _REWRITE_USER_NOTE = "Wrapped command in a subshell."
 
 # FR5c announcements: a `set -e` script wrapped in a subshell. The agent note
 # says `set -e` (so a follow-up that assumed cwd persisted is corrected) and,
-# like Rule 3a, does not echo the command — Claude Code surfaces the rewrite.
+# like FR5a, does not echo the command — Claude Code surfaces the rewrite.
 _SET_E_AGENT_NOTE = (
     "Wrapped your `set -e` script in a subshell, so any `cd` inside it does not "
     "persist and the working directory is unchanged. Keep multi-directory "
@@ -288,7 +288,7 @@ def _rewrite_to_subshell(
     The rewrite is never silent (agent: additionalContext; user: systemMessage),
     but the notes do not echo the command — Claude Code already surfaces the
     rewritten `updatedInput`. ``agent_note``/``user_note`` are the channel texts
-    for the rewrite kind (Rule 3a `cd <dir> && <cmd>` vs FR5c `set -e` script).
+    for the rewrite kind (FR5a `cd <dir> && <cmd>` vs FR5c `set -e` script).
     """
     new_input = dict(hook_input.get("tool_input", {}))
     new_input["command"] = "(" + command + ")"
@@ -307,7 +307,7 @@ def _rewrite_to_subshell(
 
 
 def _cd_block_message(root: str, in_worktree: bool) -> str:
-    """Rule 3 block text; worktree-aware when a worktree is active."""
+    """FR5 block text; worktree-aware when a worktree is active."""
     if in_worktree:
         return (
             "❌ Bash command blocked: `cd` away from the active worktree "
@@ -329,7 +329,7 @@ def _cd_block_message(root: str, in_worktree: bool) -> str:
 
 
 def _drift_block_message(cwd: str, root: str, in_worktree: bool) -> str:
-    """Rule 4 block text; worktree-aware when a worktree is active."""
+    """FR6 block text; worktree-aware when a worktree is active."""
     if in_worktree:
         return (
             "❌ Bash commands blocked: working directory is not the active "
@@ -346,7 +346,7 @@ def _drift_block_message(cwd: str, root: str, in_worktree: bool) -> str:
 
 
 def _drift_warn_message(cwd: str, root: str, in_worktree: bool) -> str:
-    """Rule 5 warning text; worktree-aware when a worktree is active."""
+    """FR7 warning text; worktree-aware when a worktree is active."""
     if in_worktree:
         return (
             f"⚠️  Working directory is not the active worktree root: {cwd}\n"
@@ -377,14 +377,14 @@ def handle_pretooluse(
 
     command = hook_input.get("tool_input", {}).get("command", "").strip()
 
-    # Rule 2: the sanctioned root-anchored form is always allowed.
+    # FR4: the sanctioned root-anchored form is always allowed.
     if _is_cd_to_root(command, root):
         sys.exit(0)
 
-    # Rule 3: any other leading `cd` is drift — block it before it happens,
+    # FR5: any other leading `cd` is drift — block it before it happens,
     # even when already at the effective root.
     if _LEADING_CD.match(command):
-        # Rule 3a: at the effective root, a `cd <subdir> && <cmd>` is rewritten
+        # FR5a: at the effective root, a `cd <subdir> && <cmd>` is rewritten
         # to a non-persisting subshell rather than blocked (saves a turn). From
         # a drifted cwd we still block — the agent must restore root first, since
         # a subshell from the wrong cwd would run the command from the wrong cwd.
@@ -400,21 +400,21 @@ def handle_pretooluse(
             )
         _block(_cd_block_message(root, in_worktree))
 
-    # Rule 1: any other command from the effective root is fine — unless it
+    # FR3: any other command from the effective root is fine — unless it
     # smuggles a drift-inducing `cd` after a top-level separator (`mkdir && cd
-    # sub && …`). A leading/bare `cd` was already handled by Rule 3; this catches
-    # the embedded case that would otherwise drift and only be caught after the
-    # fact by PostToolUse. The `(cd sub && …)` subshell form is never matched
-    # (the `cd` does not immediately follow the separator), so the sanctioned
-    # escape hatch still works. The block reuses the Rule 3 message, which already
-    # recommends that subshell form.
+    # sub && …`, FR5b). A leading/bare `cd` was already handled by FR5; this
+    # catches the embedded case that would otherwise drift and only be caught
+    # after the fact by PostToolUse. The `(cd sub && …)` subshell form is never
+    # matched (the `cd` does not immediately follow the separator), so the
+    # sanctioned escape hatch still works. The block reuses the FR5 message,
+    # which already recommends that subshell form.
     if cwd == root:
         if _EMBEDDED_CD.search(command):
-            # Rule 5c: a `set -e` script (errexit enabled by the first statement)
+            # FR5c: a `set -e` script (errexit enabled by the first statement)
             # is safe to scope to a non-persisting subshell instead of blocked —
             # errexit gives the same cd-first guarantee as `&&` (a failed `cd`
             # aborts before the tail runs), so the embedded `cd` cannot drift and
-            # cannot run the tail from the wrong cwd. Generalizes Rule 3a from a
+            # cannot run the tail from the wrong cwd. Generalizes FR5a from a
             # single `cd <dir> && <cmd>` to a whole fail-fast script. Fires only
             # here, where an embedded `cd` would otherwise block (FR5b).
             if _starts_with_errexit(command):
@@ -424,7 +424,7 @@ def handle_pretooluse(
             _block(_cd_block_message(root, in_worktree))
         sys.exit(0)
 
-    # Rule 4: drift already happened — block until cwd is restored.
+    # FR6: drift already happened — block until cwd is restored.
     _block(_drift_block_message(cwd, root, in_worktree))
 
 
