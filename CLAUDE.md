@@ -33,8 +33,7 @@ hook that keeps the agent's working directory at project root. See
   yet done, or how something was built rather than what it is); `docs/` holds
   what is true now.
 - `plugin-dev/` — vendored `claude-plugin-dev` toolkit (release recipe +
-  version-guard hook). Do not edit by hand; update with
-  `just update-plugin-dev vX.Y.Z`.
+  version-guard hook).
 - `memory/` — gitlore submodule (remote `cwd-safety-gitlore-memory`) holding
   the agent's auto-memory. gitlore's commit/push hooks sync it; don't `git add`
   or commit memory content into the parent repo by hand. After a fresh
@@ -164,3 +163,5 @@ just release [patch|minor|major]
 
 Provided by the vendored `plugin-dev/release.just`. See
 `plugin-dev/README.md`.
+
+@memory/ddaanet/shared-claude.md
