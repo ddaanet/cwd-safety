@@ -57,7 +57,12 @@ strings; a `\`-escaped character; a word-initial `#` comment to end of line
 (`$#` and `a#b` are not comments); a heredoc body — `_HEREDOC` recognises
 `<<`/`<<-` with a bare or quoted delimiter word, the body runs from the next
 newline to the line equal to the delimiter, leading tabs stripped for `<<-`,
-several heredocs on one line consumed in order; and every character inside
+several heredocs on one line consumed in order. The delimiter word takes `-`
+and `.` after its first character (`<<'END-OF'`, `<<EOF.txt`), but that first
+character stays `[A-Za-z_]`, so a `$((1 << 3))` left shift cannot read as a
+heredoc opener and blank the rest of a multi-line command; a digit-initial or
+space-containing delimiter is the residual, and costs only a spurious block.
+Also blanked: every character inside
 parentheses at any depth, which covers a `( … )` subshell, `$( … )` and
 `<( … )` alike. Depth is clamped at zero, so a `case` pattern's lone `)` cannot
 blank the rest of the command, and `$(( … ))` arithmetic is simply two nested

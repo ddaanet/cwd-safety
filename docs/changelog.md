@@ -8,6 +8,11 @@ overturned, it is rewritten in place and the reversal gets an entry here.
 
 Newest first.
 
+- [2026-08-27 — Shell-gotchas scan: four fixes and FR7b](changelog/2026-08-27-shell-gotchas-scan.md)
+  — the restore is separated by a blank line so a `\` continuation cannot
+  swallow it; `_HEREDOC` takes hyphenated delimiters; no `$CLAUDE_PROJECT_DIR`
+  fails open and shouts instead of blocking with an empty `cd`; `hooks.json`
+  quotes the plugin root; `just probe` stops evaluating its own payload.
 - [2026-08-27 — FR5b matches over a masked command](changelog/2026-08-27-mask-before-embedded-cd.md)
   — quoted, commented, heredoc and parenthesised `cd`s no longer block;
   `then`/`do`/`{` join the separators; tree-sitter probed and rejected on

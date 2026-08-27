@@ -1,8 +1,9 @@
-# Worktrees and the deleted root
+# Worktrees and the unusable root
 
 How the effective root `E` is found when the session sits inside a git
-worktree, what the hook does once `E` no longer exists on disk, and the
-decisions arguing for both. FR2 and FR7a conclude in [design.md](../design.md);
+worktree, what the hook does once `E` is unusable — gone from disk, or never
+set — and the decisions arguing for both. FR2, FR7a and FR7b conclude in
+[design.md](../design.md);
 this file is what you need while building or debugging `_worktree_root` and the
 fail-open path. The `cd E` match that `E` feeds stays exact
 ([matchers.md](matchers.md)); the cross-root exclusion the restore rewrite
@@ -12,8 +13,9 @@ applies while a worktree is active is in
 - One root, found on disk — **(h)** a single effective root `E`, the enclosing
   worktree detected from the on-disk `.git` linkage; a `cd` back to the main
   root while a worktree is active is blocked in favor of `ExitWorktree` ·
-  **(k)** the hook fails open once `E` no longer exists on disk, and a
-  `$CLAUDE_PROJECT_DIR` that is itself a linked worktree is a plain root
+  **(k)** the hook fails open whenever `E` is unusable — gone from disk or never
+  set — and a `$CLAUDE_PROJECT_DIR` that is itself a linked worktree is a plain
+  root
 
 ---
 
@@ -48,9 +50,15 @@ contract "keep cwd at `E`" is unsatisfiable. On `PreToolUse` the hook allows
 `PostToolUse` it emits a *replacement* warning on both channels
 (`_root_gone_message`) that names `E`, states the guard is disabled for the
 session, and says to restart — superseding the FR7 `cd E` hint, which is
-impossible once `E` is gone. `E == ""` (no `$CLAUDE_PROJECT_DIR`) is a
-different degenerate state and does not trigger fail-open. Because `E` stays
-gone, the guard is effectively off for the remainder of the session.
+impossible once `E` is gone.
+
+**No root at all (FR7b).** When `E` is empty — no `$CLAUDE_PROJECT_DIR` — the
+same fail-open path runs, for a different reason: there is no root to enforce
+and none to *name*. `PreToolUse` allows every command; `PostToolUse` emits
+`_no_root_message`, which names `$CLAUDE_PROJECT_DIR` as the fault, says the
+guard is disabled, and says outright that nothing runnable from the session
+fixes it. Because neither state repairs itself, the guard is effectively off
+for the remainder of the session in both.
 
 ---
 
@@ -89,11 +97,13 @@ special-cased here: `_worktree_root` finds no enclosing worktree, so `E` is that
 path and it is governed as a plain root. See decision (k) for why special-casing
 it is wrong.
 
-### (k) Fail open on a deleted root; drop the shape-2 self-destruct guard
+### (k) Fail open on an unusable root; drop the shape-2 self-destruct guard
 
-**Decision:** (1) When the effective root `E` does not exist on disk, the hook
-fails open — PreToolUse allows everything silently, PostToolUse emits a "guard
-disabled — restart" notice (FR7a). (2) The `_worktree_main_root` special-case
+**Decision:** (1) When the effective root `E` is unusable, the hook fails open —
+PreToolUse allows everything silently, PostToolUse emits a "guard disabled —
+restart" notice. Two states qualify: `E` does not exist on disk (FR7a), and `E`
+is empty because `$CLAUDE_PROJECT_DIR` is unset (FR7b), each with its own
+notice text. (2) The `_worktree_main_root` special-case
 (which treated a `$CLAUDE_PROJECT_DIR` that is itself a linked worktree as a
 worktree, blocking `cd <main>` in favor of `ExitWorktree`) is removed; that
 shape is now governed as a plain root.
@@ -107,6 +117,19 @@ no-ops (target gone), and the Bash tool deadlocks. The guard's whole contract is
 coherent behavior is to step aside. Fail-open covers *every* deletion vector —
 self-removal, another session's `git worktree remove`, `git worktree prune`, an
 external `rm` — because it keys on the on-disk fact, not the mechanism.
+
+The empty-`E` state reaches the same conclusion by the same argument, and adding
+it costs one branch. There the contract is not merely unsatisfiable but
+unstatable: every rule decides against `E`, so with `E == ""` the FR6 block
+fired on *every* command and told the agent to run `cd` with no argument — a
+hard deadlock behind an instruction that cannot be followed, which is strictly
+worse than no guard. Failing open is the same "step aside" call. What differs
+is the notice: `E` is not a path that vanished but a variable Claude Code sets
+when the hook fires, so the message names the misconfiguration and says no
+command in the session repairs it, rather than pointing at a root. Silence
+would be wrong here — an unset `$CLAUDE_PROJECT_DIR` means the guard is not
+running at all, which the human should hear about — so the fail-open shouts,
+once per Bash call, on both channels.
 
 A `_worktree_main_root` guard once tried to *prevent* this trap by blocking the
 self-`cd <main>`. Its advice was a dead end: `ExitWorktree` is a no-op for a
@@ -150,3 +173,16 @@ For decision (k):
 3. **Keep the shape-2 guard and document `ExitWorktree` as the exit** —
    rejected: `ExitWorktree` is a no-op for this session shape, so the
    documented exit does not exist.
+4. **Keep blocking when `E` is empty, with a message naming the
+   misconfiguration** — rejected: a correct diagnosis does not make the block
+   followable. Nothing runnable inside the session sets `$CLAUDE_PROJECT_DIR`,
+   so the Bash tool stays deadlocked until a restart; the notice belongs on
+   PostToolUse, where it costs nothing.
+5. **Anchor `E` to `cwd` when `$CLAUDE_PROJECT_DIR` is unset** — rejected: it
+   would enshrine whatever directory the shell happens to sit in as the project
+   root, so drift already in progress becomes the anchor, and it is the same
+   path heuristic decision (h) refused for worktree detection.
+6. **Fail open on an empty `E` silently, as `PreToolUse` already does** —
+   rejected: an unset `$CLAUDE_PROJECT_DIR` means the guard is not running at
+   all. That is a fact about the session the human should hear, and the state
+   never clears on its own.

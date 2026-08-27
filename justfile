@@ -23,6 +23,9 @@ format-docs:
     set -euo pipefail
     have=$({{ rumdl }} --version) || { echo "format-docs: rumdl not on PATH — run 'uv sync' and let direnv load .envrc" >&2; exit 1; }
     want=$(sed -n 's/.*"rumdl==\([0-9.]*\)".*/\1/p' pyproject.toml)
+    # sed exits 0 on no match, so an empty $want means the pin line changed
+    # shape — not a stale venv, and 'uv sync' would not fix it.
+    [ -n "$want" ] || { echo "format-docs: no \"rumdl==<version>\" pin found in pyproject.toml" >&2; exit 1; }
     [ "$have" = "rumdl $want" ] || { echo "format-docs: $have on PATH, pyproject.toml pins $want — run 'uv sync'" >&2; exit 1; }
     {{ rumdl }} fmt --no-cache docs plans
 
@@ -54,7 +57,8 @@ check-docs:
             if not name.endswith(".md"):
                 continue
             path = os.path.join(root, name)
-            text = re.sub(r"```.*?```", "", open(path).read(), flags=re.S)
+            raw = open(path, encoding="utf-8").read()  # docs carry ❌/⚠️ literals
+            text = re.sub(r"```.*?```", "", raw, flags=re.S)
             for target in re.findall(r"\]\(([^)#\s]+)(?:#[^)]*)?\)", text):
                 if "://" in target:
                     continue
@@ -77,9 +81,18 @@ probe event cwd command='':
     #!/usr/bin/env bash
     # just probe PreToolUse /some/cwd 'cd subdir && ls'
     # CLAUDE_PROJECT_DIR defaults to this repo root.
-    set -euo pipefail
-    root="$(git rev-parse --show-toplevel)"
-    json=$(jq -cn --arg e "{{event}}" --arg w "{{cwd}}" --arg c "{{command}}" \
-        '{hook_event_name:$e, cwd:$w, tool_input:{command:$c}}')
+    # The arguments below go through just's `quote` function, never bare inside
+    # shell double quotes: just interpolates raw text, so a double-quoted
+    # interpolation hands the probe payload to *this* shell first — a `$(…)` in
+    # it runs, quotes collapse, and the hook is then asked about a command
+    # nobody typed. The payload is shell text by definition; it must reach jq
+    # byte for byte.
+    set -uo pipefail
+    root="$(git rev-parse --show-toplevel)" || exit 1
+    json=$(jq -cn --arg e {{ quote(event) }} --arg w {{ quote(cwd) }} --arg c {{ quote(command) }} \
+        '{hook_event_name:$e, cwd:$w, tool_input:{command:$c}}') || exit 1
+    # No `set -e`, and the status is captured: a block is exit 2, the outcome
+    # most worth probing, and errexit would kill the recipe before it is named.
     printf '%s' "$json" | CLAUDE_PROJECT_DIR="$root" python3 scripts/cwd-safety.py
-    echo "exit: $?"
+    rc=$?
+    echo "exit: $rc"

@@ -22,7 +22,7 @@ call:
 | Touching                                                              | Read first                          |
 |-----------------------------------------------------------------------|-------------------------------------|
 | `_is_cd_to_root`, `_LEADING_CD`, `_CD_AND`, `_REDIR*`, `_EMBEDDED_CD`, `_mask_opaque`, `_HEREDOC`, `_SET_ERREXIT`; FR4, FR5, FR5b; decisions (c), (d), (j) | `docs/references/matchers.md` |
-| `_worktree_root`, `_read_gitdir`, `_is_under`, `_root_gone_message`; FR2, FR7a; decisions (h), (k) | `docs/references/worktrees.md` |
+| `_worktree_root`, `_read_gitdir`, `_is_under`, `_root_gone_message`, `_no_root_message`; FR2, FR7a, FR7b; decisions (h), (k) | `docs/references/worktrees.md` |
 | `_rewrite_with_restore`, the `_REWRITE_*`/`_SET_E_*` notes; FR5a, FR5c; decisions (i), (l) | `docs/references/restore-rewrite.md` |
 
 A design change edits the hub's conclusion line *and* the node's argument in

@@ -28,11 +28,13 @@ PostToolUse(Bash):
 FR7. ``W != R`` after a command ran → inject an additionalContext +
    systemMessage warning. ``W == R`` → silent.
 
-Fail-open: if the effective root ``R`` no longer exists on disk (a worktree
-removed out from under the session, say), the guard's contract is unsatisfiable.
-PreToolUse allows every command silently and PostToolUse swaps the impossible
-``cd R`` restore hint for a "guard disabled — restart the session" notice. The
-root stays gone, so the guard is effectively off for the rest of the session.
+Fail-open: if there is no usable effective root ``R`` the guard's contract is
+unsatisfiable, so PreToolUse allows every command silently and PostToolUse
+swaps the impossible ``cd R`` restore hint for a notice naming the state. Two
+states qualify — ``R`` no longer exists on disk (a worktree removed out from
+under the session, FR7a) and ``$CLAUDE_PROJECT_DIR`` is unset, so there is no
+root to name at all (FR7b). Neither repairs itself, so the guard is effectively
+off for the rest of the session.
 
 Security: ``cd R && cmd`` is equivalent to running ``cmd`` from project root.
 The ``&&`` ensures ``cmd`` runs only if the ``cd`` succeeds. Only ``&&`` is
@@ -75,9 +77,14 @@ _EMBEDDED_CD = re.compile(
 )
 
 # A heredoc operator and its delimiter word, as `_mask_opaque` recognises it:
-# `<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"`. The body runs from the next newline to
-# the line equal to the delimiter (leading tabs stripped for `<<-`).
-_HEREDOC = re.compile(r"<<(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
+# `<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"`, `<<'END-OF'`. The body runs from the
+# next newline to the line equal to the delimiter (leading tabs stripped for
+# `<<-`). The word takes `-` and `.` after its first character, so a hyphenated
+# or dotted delimiter masks its body like a plain one; the first character stays
+# `[A-Za-z_]` so a `$((1 << 3))` shift can never read as a heredoc opener.
+# Residual, both costing only a spurious block: a delimiter starting with a digit
+# and one containing whitespace (`<<'END OF'`).
+_HEREDOC = re.compile(r"<<(-?)\s*(['\"]?)([A-Za-z_][-.A-Za-z0-9_]*)\2")
 
 # Leading blank lines and `#`-comment lines to skip before a command's first
 # effective statement (a shebang-like `#!/bin/bash` first line is one such comment).
@@ -378,7 +385,11 @@ def _rewrite_with_restore(
     `excludedCommands` matcher only splits `program`/`list`/`pipeline` nodes,
     so a subshell hides the inner command from an exclusion and downgrades it
     to a sandboxed run; and a newline (not `;`) keeps a trailing heredoc or
-    comment in ``command`` intact. cwd is therefore restored by a trailing
+    comment in ``command`` intact. The separator is a *blank* line: a command
+    ending in a `\\` line continuation would otherwise swallow the restore as
+    one more argument (`echo one \\`⏎`cd <E>` runs `echo one cd <E>` and never
+    restores), and the blank line terminates the continuation.
+    cwd is therefore restored by a trailing
     statement, not by construction — a tail that `exec`s or `exit`s skips it,
     and PostToolUse (FR7) is the backstop for that.
     The rewrite is never silent (agent: additionalContext; user: systemMessage),
@@ -387,7 +398,7 @@ def _rewrite_with_restore(
     for the rewrite kind (FR5a `cd <dir> && <cmd>` vs FR5c `set -e` script).
     """
     new_input = dict(hook_input.get("tool_input", {}))
-    new_input["command"] = command + "\ncd " + shlex.quote(root)
+    new_input["command"] = command + "\n\ncd " + shlex.quote(root)
     output = {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -460,15 +471,16 @@ def handle_pretooluse(
     hook_input: dict, cwd: str, root: str, in_worktree: bool, project_dir: str
 ) -> None:
     """Allow root-anchored commands; block drift-inducing cd and wrong-cwd work."""
-    # Fail open: if the effective root no longer exists on disk (e.g. a worktree
-    # session whose worktree was removed out from under it — the shell then falls
-    # back to the main repo), the guard's contract "keep cwd at `root`" is
-    # unsatisfiable. Step aside silently so the agent can work from wherever the
-    # shell landed. This precedes every rule, so even a leading `cd` is freed —
-    # the agent must be able to leave. PostToolUse explains it once per command.
-    # After a deletion the root stays gone, so the guard is effectively off for
-    # the rest of the session (see DESIGN limitation / decision (k)).
-    if root and not os.path.isdir(root):
+    # Fail open: with no usable effective root the guard's contract "keep cwd at
+    # `root`" is unsatisfiable — either the root no longer exists on disk (a
+    # worktree removed out from under the session; the shell falls back to the
+    # main repo) or `$CLAUDE_PROJECT_DIR` is unset, so there is no root to name.
+    # Step aside silently so the agent can work from wherever the shell landed.
+    # This precedes every rule, so even a leading `cd` is freed — the agent must
+    # be able to leave. PostToolUse shouts once per command, naming which of the
+    # two states it is. Neither state repairs itself, so the guard is effectively
+    # off for the rest of the session (see DESIGN FR7a/FR7b, decision (k)).
+    if not root or not os.path.isdir(root):
         sys.exit(0)
 
     command = hook_input.get("tool_input", {}).get("command", "").strip()
@@ -537,11 +549,33 @@ def _root_gone_message(root: str) -> str:
     )
 
 
+def _no_root_message() -> str:
+    """PostToolUse notice when there is no effective root at all (FR7b).
+
+    ``$CLAUDE_PROJECT_DIR`` is unset or empty, so every rule that names the root
+    would name nothing: the FR6 block's ``cd {root}`` hint reads ``cd`` with no
+    argument, which restores nothing and cannot be acted on. The hook fails open
+    instead and says what is actually wrong — a harness misconfiguration no
+    command in the session can repair.
+    """
+    return (
+        "⚠️  cwd-safety: $CLAUDE_PROJECT_DIR is unset or empty, so the "
+        "working-directory guard has no project root to enforce and is disabled "
+        "for this session. Nothing you can run from here fixes it — the variable "
+        "is set by Claude Code when the hook fires. Restart the session from the "
+        "project directory, and report it if it recurs."
+    )
+
+
 def handle_posttooluse(cwd: str, root: str, in_worktree: bool) -> None:
-    """Warn (non-blocking) after cwd drift, or when the root has vanished."""
-    if root and not os.path.isdir(root):
-        # Root deleted — the generic `cd {root}` restore hint is impossible, so
-        # emit the fail-open notice instead (guard disabled for the session).
+    """Warn (non-blocking) after cwd drift, or when there is no usable root."""
+    if not root:
+        # FR7b: no `$CLAUDE_PROJECT_DIR` — every root-naming message would be
+        # nonsense, so say what is wrong instead of emitting an empty `cd `.
+        warning = _no_root_message()
+    elif not os.path.isdir(root):
+        # FR7a: root deleted — the generic `cd {root}` restore hint is
+        # impossible, so emit the fail-open notice instead.
         warning = _root_gone_message(root)
     elif cwd != root:
         warning = _drift_warn_message(cwd, root, in_worktree)

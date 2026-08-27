@@ -129,11 +129,13 @@ def rewritten(event, cwd, command, expected_cmd, root=ROOT):
 
 
 def restore(command, eff_root):
-    """The FR5a/FR5c rewrite shape: the command as written, then a newline and a
-    `cd` back to the effective root. A newline — not `;` or `&&` — so a trailing
+    """The FR5a/FR5c rewrite shape: the command as written, then a blank line and
+    a `cd` back to the effective root. A newline — not `;` or `&&` — so a trailing
     heredoc or comment in `command` survives; no `( … )`, which would hide the
-    command's segments from the sandbox `excludedCommands` matcher."""
-    return f"{command}\ncd {eff_root}"
+    command's segments from the sandbox `excludedCommands` matcher. The line is
+    *blank* so a command ending in a `\\` continuation cannot swallow the `cd` as
+    one more argument."""
+    return f"{command}\n\ncd {eff_root}"
 
 
 # ── FR3: at root, non-cd commands pass silently ─────────────────────────────
@@ -195,7 +197,14 @@ check("at root: trailing heredoc survives the rewrite",
       rewritten("PreToolUse", ROOT, "cd sub && cat <<'EOF'\nhi\nEOF",
                 restore("cd sub && cat <<'EOF'\nhi\nEOF", ROOT)))
 check("spaced root: appended restore is quoted",
-      rewritten("PreToolUse", SPACED, "cd sub && ls", f"cd sub && ls\ncd '{SPACED}'", root=SPACED))
+      rewritten("PreToolUse", SPACED, "cd sub && ls", f"cd sub && ls\n\ncd '{SPACED}'", root=SPACED))
+# A command ending in a `\` line continuation joins to the next physical line. A
+# single newline would make the restore an argument of the last command
+# (`echo one \`⏎`cd E` runs `echo one cd E`, and cwd stays drifted while the
+# agent is told it was restored); the blank line terminates the continuation.
+check("at root: trailing `\\` continuation does not swallow the restore",
+      rewritten("PreToolUse", ROOT, "cd sub && echo one \\",
+                restore("cd sub && echo one \\", ROOT)))
 _c, _o, _e = run("PreToolUse", ROOT, "cd sub && ls")
 _hso = json.loads(_o)["hookSpecificOutput"]
 check("rewrite notes do not advertise a subshell",
@@ -334,6 +343,14 @@ check("embedded: heredoc body mentioning `&& cd` allowed",
       allowed("PreToolUse", ROOT, "python3 - <<'EOF'\nimport os\n# foo && cd sub\nEOF"))
 check("embedded: `<<-` heredoc body with tab-indented delimiter allowed",
       allowed("PreToolUse", ROOT, "cat <<-EOF\n\tx; cd sub\n\tEOF"))
+check("embedded: hyphenated-delimiter heredoc body mentioning `cd` allowed",
+      allowed("PreToolUse", ROOT, "cat > f <<'END-OF'\ncd /etc\nEND-OF"))
+check("embedded: dotted-delimiter heredoc body mentioning `cd` allowed",
+      allowed("PreToolUse", ROOT, "cat > f <<'EOF.txt'\ncd /etc\nEOF.txt"))
+# `<<` inside arithmetic is a left shift, not a heredoc opener: the delimiter's
+# first character stays `[A-Za-z_]` so `3` cannot open one and blank the rest.
+check("embedded: `cd` after an arithmetic left shift still blocked",
+      blocked("PreToolUse", ROOT, "n=$((1 << 3))\ncd sub"))
 check("embedded: `cd` after a heredoc's closing delimiter still blocked",
       blocked("PreToolUse", ROOT, "cat <<EOF\nbody\nEOF\ncd sub"))
 check("embedded: `cd` on the heredoc's own command line still blocked",
@@ -472,6 +489,29 @@ check("failopen: PostToolUse warns 'guard disabled — restart', no `cd E` hint"
 # A real-but-oddly-spelled root (trailing slash) is live, not deleted: no fail-open.
 check("failopen: trailing-slash live root is not seen as deleted",
       blocked("PreToolUse", SUB, "ls", root=ROOT + os.sep))
+
+# ── FR7b: no effective root at all ────────────────────────────────────────────
+# With `$CLAUDE_PROJECT_DIR` unset there is no root to enforce and none to name:
+# the FR6 block's restore hint would read `cd ` with no argument, an instruction
+# that cannot be followed. So the hook fails open like FR7a — PreToolUse allows
+# everything, before every rule — and PostToolUse shouts a notice naming the
+# real fault (a harness misconfiguration) instead of an empty `cd`.
+check("no root: `ls` allowed, not blocked", allowed("PreToolUse", SUB, "ls", root=""))
+check("no root: leading `cd sub` allowed", allowed("PreToolUse", SUB, "cd sub", root=""))
+check("no root: embedded `mkdir x && cd x` allowed",
+      allowed("PreToolUse", SUB, "mkdir x && cd x", root=""))
+_c, nr_out, _e = run("PostToolUse", SUB, "ls", root="")
+nr = _c == 0 and "additionalContext" in nr_out
+if nr:
+    _nr = json.loads(nr_out)
+    nr_ctx = _nr["hookSpecificOutput"]["additionalContext"]
+    nr = (
+        "CLAUDE_PROJECT_DIR" in nr_ctx          # names the actual fault
+        and "disabled" in nr_ctx                # says the guard is off
+        and "cd " not in nr_ctx                 # never an empty/impossible `cd` hint
+        and nr_ctx == _nr.get("systemMessage")  # shouts on both channels
+    )
+check("no root: PostToolUse shouts the misconfiguration, no empty `cd` hint", nr)
 
 
 if _fails:

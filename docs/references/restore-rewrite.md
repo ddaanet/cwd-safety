@@ -1,7 +1,7 @@
 # The restore rewrite
 
 FR5a and FR5c in full: the two shapes issued from the effective root that the
-hook rewrites — appending a newline and `cd <E>` — instead of blocking, what
+hook rewrites — appending a blank line and `cd <E>` — instead of blocking, what
 the rewrite announces, what it excludes, and the decisions arguing for that
 shape. The conclusions are in [design.md](../design.md); this file is what you
 need while building or debugging `_rewrite_with_restore` and its two triggers.
@@ -9,7 +9,7 @@ The matchers that recognize the triggers are in [matchers.md](matchers.md);
 the worktree cross-root exclusion is grounded in [worktrees.md](worktrees.md).
 
 - Rewrite, never block or wrap — **(i)** `cd <dir> && <cmd>` from root is
-  rewritten with a newline and `cd <E>` appended, never blocked and never
+  rewritten with a blank line and `cd <E>` appended, never blocked and never
   wrapped in `( … )` · **(l)** a `set -e` script with an embedded `cd` gets the
   same restore; errexit is the trigger, not the guarantee, because it is inert
   under the Bash tool
@@ -20,10 +20,12 @@ the worktree cross-root exclusion is grounded in [worktrees.md](worktrees.md).
 
 Both triggers go through `_rewrite_with_restore`, which returns
 `permissionDecision: "allow"` with `hookSpecificOutput.updatedInput` replacing
-the command `C` with `C`, a newline, and `cd <E>` (`E` shell-quoted). The
+the command `C` with `C`, a blank line, and `cd <E>` (`E` shell-quoted). The
 restore is a separate line, never a `( … )` subshell and never a `;`: a
 subshell hides the command from the sandbox's `excludedCommands` matcher, and
-a newline keeps a trailing heredoc or `# comment` intact (decision (i)). Both
+a newline keeps a trailing heredoc or `# comment` intact. The line is *blank*
+because a `C` ending in a `\` continuation would otherwise join the restore to
+its last command as one more argument (decision (i)). Both
 triggers fire only when `W == E`: from a drifted cwd the same command is still
 blocked (FR6), because a relative `<dir>` resolved from the wrong cwd would run
 the tail from the wrong place — the agent restores `E` first.
@@ -73,9 +75,10 @@ back to root after set -e script."
 ### (i) Rewrite `cd <subdir> && <cmd>` with a restore appended instead of blocking
 
 **Decision:** At the effective root, a `cd <path> && <rest>` command is
-rewritten in place to `cd <path> && <rest>`, newline, `cd <E>` via a
+rewritten in place to `cd <path> && <rest>`, blank line, `cd <E>` via a
 `PreToolUse` `updatedInput`, rather than blocked (FR5a). The restore is a flat
-trailing line — never a `( … )` subshell, never joined with `;`. Bare
+trailing line — never a `( … )` subshell, never joined with `;`, and separated
+by a blank line so a `\` continuation cannot absorb it. Bare
 `cd <path>`, the `;`/`||` separators, a cross-root `cd` to `$CLAUDE_PROJECT_DIR`
 while in a worktree, and the same command from a drifted cwd all remain blocked.
 No message the hook emits advertises a `( … )` subshell form.
@@ -103,6 +106,15 @@ line) all keep the exclusion. The restore therefore goes on its own line: the
 newline — not `;` — is what lets a trailing heredoc or `# comment` in the
 agent's command survive (a `)` or `; cd E` appended after a heredoc's closing
 delimiter breaks the command; the survey found 13 such manglings).
+
+The separator is a *blank* line rather than a single newline, because one
+newline is not enough to end a statement: a command whose last line ends in a
+`\` continuation joins to whatever follows, so `cd sub && echo one \`⏎`cd E`
+runs `echo one cd E` and never restores — while the announcement still tells
+the agent cwd was restored, which is worse than the drift. A blank line
+terminates the continuation (the `\` joins to the empty line and the statement
+ends), and is inert everywhere else: it lands after any heredoc's closing
+delimiter, so nothing a heredoc, comment or list can do is affected by it.
 
 This is still **free on the security axis** in the sense that matters: the
 appended `cd E` is the exact-match root path, shell-quoted, and the agent's
@@ -147,7 +159,7 @@ so a quoted or escaped main-root path is caught just like a bare one.
 
 **Decision:** At the effective root, a command whose first statement enables
 shell errexit (`set -e` / variant) and that contains an embedded `cd` — which
-FR5b would otherwise block — is rewritten in place to `C`, newline, `cd <E>`
+FR5b would otherwise block — is rewritten in place to `C`, blank line, `cd <E>`
 via a `PreToolUse` `updatedInput` (FR5c), the same treatment FR5a gives
 `cd <dir> && <cmd>`. The `+` forms, errexit-absent `set`, a non-first `set`,
 and the same script from a drifted cwd all remain blocked.

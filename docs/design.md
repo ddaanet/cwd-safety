@@ -64,12 +64,12 @@ form `cd <dir> && <rest>` — a leading `cd` to a single directory argument
 (quoted or backslash-escaped spaces allowed, redirections allowed before the
 `&&`) joined by `&&` to a non-empty tail, not satisfying FR4 — is **not**
 blocked. The hook returns `permissionDecision: "allow"` with
-`hookSpecificOutput.updatedInput` replacing the command with `C`, a newline, and
-`cd <E>` (shell-quoted), so cwd is restored by the trailing statement — never a
-`( … )` subshell, never `;`. The rewrite is announced on both channels, never
-silent, and neither note echoes the command. Excluded, falling through to the
-FR5 block: a bare `cd <dir>`; a pathless `cd && …`; `cd a b && …`; the `;` and
-`||` separators; and, while a worktree is active, a `cd` to
+`hookSpecificOutput.updatedInput` replacing the command with `C`, a blank line,
+and `cd <E>` (shell-quoted), so cwd is restored by the trailing statement —
+never a `( … )` subshell, never `;`. The rewrite is announced on both channels,
+never silent, and neither note echoes the command. Excluded, falling through to
+the FR5 block: a bare `cd <dir>`; a pathless `cd && …`; `cd a b && …`; the `;`
+and `||` separators; and, while a worktree is active, a `cd` to
 `$CLAUDE_PROJECT_DIR` (compared de-quoted). From a drifted cwd (`W != E`) the
 same command is blocked (FR6). Mechanism and announcement text in
 [restore-rewrite.md](references/restore-rewrite.md).
@@ -93,11 +93,11 @@ whose first effective statement (after leading blank or `#`-comment lines) is a
 `set` builtin that enables errexit (`set -e`, `set -eu`, `set -euo pipefail`,
 `set -ex`, `set -o errexit`) and which FR5b would otherwise block is **not**
 blocked; it gets the same allow-with-`updatedInput` rewrite as FR5a — `C`, a
-newline, `cd <E>` — and a dedicated dual-channel announcement that also states
-that `set -e` does not abort a Bash tool command. `set -e` is the trigger, not
-the guarantee: errexit is inert under the Bash tool (decision (l)), so the
-appended restore is what keeps cwd at `E`. Excluded, falling through to the
-FR5b block: the `+` forms and errexit-absent `set`; a `set` that is not the
+blank line, `cd <E>` — and a dedicated dual-channel announcement that also
+states that `set -e` does not abort a Bash tool command. `set -e` is the
+trigger, not the guarantee: errexit is inert under the Bash tool (decision (l)),
+so the appended restore is what keeps cwd at `E`. Excluded, falling through to
+the FR5b block: the `+` forms and errexit-absent `set`; a `set` that is not the
 first statement; `setup && …`. A `set -e` script with no embedded `cd` stays
 allow-silent (FR3). No cross-root carve-out is mirrored from FR5a. From a
 drifted cwd the script is blocked (FR6). Mechanism in
@@ -118,12 +118,21 @@ exists on disk, the guard's contract "keep cwd at `E`" is unsatisfiable. On
 `PreToolUse` the hook then allows *every* command silently, before all other
 rules (FR3–FR6). On `PostToolUse` it emits a *replacement* warning (both
 channels) that names `E`, states the guard is disabled for the session, and
-says to restart. `E == ""` (no `$CLAUDE_PROJECT_DIR`) does not trigger
-fail-open. Decision (k), mechanism in
+says to restart. Decision (k), mechanism in
 [worktrees.md](references/worktrees.md).
 
+**FR7b (fail-open with no root at all).** When `E` is empty — no
+`$CLAUDE_PROJECT_DIR` — there is no root to enforce and none to name: the FR6
+block's restore hint would read `cd` with no argument. `PreToolUse` therefore
+allows every command, like FR7a, and `PostToolUse` shouts a *replacement*
+notice (both channels) that names `$CLAUDE_PROJECT_DIR` as the fault, states
+the guard is disabled for the session, and says no command in the session can
+repair it. The hook never blocks and never emits an empty `cd`. Decision (k),
+mechanism in [worktrees.md](references/worktrees.md).
+
 **FR8 (wiring).** `hooks/hooks.json` registers `scripts/cwd-safety.py` via
-`python3 ${CLAUDE_PLUGIN_ROOT}/scripts/cwd-safety.py` for both
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cwd-safety.py"` — quoted, so an install
+path containing a space does not word-split — for both
 `PreToolUse[Bash]` and `PostToolUse[Bash]` with a 5-second timeout.
 
 **FR9 (unknown events).** If the hook is invoked with a `hook_event_name`
@@ -273,15 +282,16 @@ actively misleads about the scope of the guard.
 arbitrary tokens between the target and `&&` · rewriting an embedded `cd` into
 a subshell · leaving embedded `cd` to PostToolUse · a tree-sitter bash parse.
 
-**Worktrees and the deleted root** — how `E` is found, and what happens when
-it is gone. [worktrees.md](references/worktrees.md)
+**Worktrees and the unusable root** — how `E` is found, and what happens when
+it is gone or was never set. [worktrees.md](references/worktrees.md)
 
 - **(h)** — a single effective root `E`, the enclosing worktree detected from
   the on-disk `.git` linkage; a `cd` back to the main root while a worktree is
   active is blocked in favor of `ExitWorktree`
-- **(k)** — the hook fails open once `E` no longer exists on disk; a
-  `$CLAUDE_PROJECT_DIR` that is itself a linked worktree is a plain root, with
-  no self-destruct guard
+- **(k)** — the hook fails open whenever `E` is unusable, whether it no longer
+  exists on disk or was never set, shouting what is wrong rather than blocking
+  with an unfollowable hint; a `$CLAUDE_PROJECT_DIR` that is itself a linked
+  worktree is a plain root, with no self-destruct guard
 
 *Rejected:* a `worktree` payload field · the `.claude/worktrees/` path
 convention · accepting both roots · the hook setting the Bash cwd · a
@@ -292,7 +302,7 @@ the shape-2 guard.
 the restore is a flat trailing line.
 [restore-rewrite.md](references/restore-rewrite.md)
 
-- **(i)** — `cd <dir> && <cmd>` from root is rewritten with a newline and
+- **(i)** — `cd <dir> && <cmd>` from root is rewritten with a blank line and
   `cd <E>` appended, never blocked and never wrapped in `( … )`: a subshell
   defeats the sandbox `excludedCommands` matcher and mangles a trailing heredoc
 - **(l)** — a `set -e` script with an embedded `cd` gets the same restore;
@@ -359,12 +369,13 @@ embedded-`cd` script.
   `$CLAUDE_PROJECT_DIR/.git` (e.g. a different repo) is treated as drift, not as
   a valid anchor.
 
-- **The guard disables itself for the rest of a session after root deletion.**
-  Once `E` no longer exists on disk, fail-open (FR7a / decision (k)) allows
-  every command; `E` never comes back, so there is no re-anchoring within that
-  session. This is intended — a worktree session that removed its own worktree
-  is winding down at the main repo — and the PostToolUse notice tells the human
-  to restart to re-establish a valid root.
+- **The guard disables itself for the rest of a session once `E` is unusable.**
+  Whether `E` no longer exists on disk (FR7a) or was never set (FR7b), fail-open
+  allows every command; neither state repairs itself, so there is no
+  re-anchoring within that session. This is intended — a worktree session that
+  removed its own worktree is winding down at the main repo, and a session with
+  no `$CLAUDE_PROJECT_DIR` cannot be given one from inside — and the PostToolUse
+  notice tells the human which state it is and to restart.
 
 ## History
 

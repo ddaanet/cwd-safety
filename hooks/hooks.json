@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/scripts/cwd-safety.py",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/cwd-safety.py\"",
             "timeout": 5
           }
         ]
@@ -19,7 +19,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/scripts/cwd-safety.py",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/cwd-safety.py\"",
             "timeout": 5
           }
         ]
