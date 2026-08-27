@@ -36,6 +36,7 @@ PROJSUB = os.path.join(PROJ, "subdir")   # ordinary subdir of the main tree
 OTHER = os.path.join(_TMP, "other")      # foreign repo: .git is a directory
 EVIL = os.path.join(_TMP, "evil")        # spoof: .git file whose gitdir is outside PROJ
 BINGIT = os.path.join(_TMP, "bingit")    # dir whose .git is non-UTF-8 bytes
+SPACED = os.path.join(_TMP, "my root")   # effective root whose path needs quoting
 
 os.makedirs(SUB)  # also creates ROOT; GONE is deliberately left absent
 os.makedirs(os.path.join(PROJ, ".git", "worktrees", "wt1"))
@@ -45,6 +46,7 @@ os.makedirs(WTDEEP)
 os.makedirs(os.path.join(OTHER, ".git"))
 os.makedirs(EVIL)
 os.makedirs(BINGIT)
+os.makedirs(SPACED)
 with open(os.path.join(WT, ".git"), "w") as _f:
     _f.write("gitdir: " + os.path.join(PROJ, ".git", "worktrees", "wt1") + "\n")
 with open(os.path.join(EVIL, ".git"), "w") as _f:
@@ -126,6 +128,14 @@ def rewritten(event, cwd, command, expected_cmd, root=ROOT):
     )
 
 
+def restore(command, eff_root):
+    """The FR5a/FR5c rewrite shape: the command as written, then a newline and a
+    `cd` back to the effective root. A newline — not `;` or `&&` — so a trailing
+    heredoc or comment in `command` survives; no `( … )`, which would hide the
+    command's segments from the sandbox `excludedCommands` matcher."""
+    return f"{command}\ncd {eff_root}"
+
+
 # ── FR3: at root, non-cd commands pass silently ─────────────────────────────
 check("at root: `ls` allowed", allowed("PreToolUse", ROOT, "ls -la"))
 check("at root: pipeline allowed", allowed("PreToolUse", ROOT, "git status | head"))
@@ -147,25 +157,25 @@ check("at root: `cd -` blocked", blocked("PreToolUse", ROOT, "cd -"))
 check("`cd ROOT; ls` blocked (only && allowed)", blocked("PreToolUse", ROOT, f"cd {ROOT}; ls"))
 check("`cd ROOT || ls` blocked (only && allowed)", blocked("PreToolUse", ROOT, f"cd {ROOT} || ls"))
 
-# ── FR5a: at root, `cd <subdir> && <cmd>` is rewritten to a non-persisting
-#    subshell instead of blocked — saves the agent a turn, keeps cwd at root ──
-check("at root: `cd subdir && ls` rewritten to subshell",
-      rewritten("PreToolUse", ROOT, "cd subdir && ls", "(cd subdir && ls)"))
-check("at root: `cd ../sib && make` rewritten to subshell",
-      rewritten("PreToolUse", ROOT, "cd ../sib && make", "(cd ../sib && make)"))
-check("at root: `cd /tmp && cmd` rewritten to subshell",
-      rewritten("PreToolUse", ROOT, "cd /tmp && cmd", "(cd /tmp && cmd)"))
-check("at root: multi-`&&` tail wrapped whole",
-      rewritten("PreToolUse", ROOT, "cd a && b && c", "(cd a && b && c)"))
+# ── FR5a: at root, `cd <subdir> && <cmd>` gets a `cd <root>` restore appended
+#    instead of blocked — saves the agent a turn, keeps cwd at root ──────────
+check("at root: `cd subdir && ls` rewritten with restore",
+      rewritten("PreToolUse", ROOT, "cd subdir && ls", restore("cd subdir && ls", ROOT)))
+check("at root: `cd ../sib && make` rewritten with restore",
+      rewritten("PreToolUse", ROOT, "cd ../sib && make", restore("cd ../sib && make", ROOT)))
+check("at root: `cd /tmp && cmd` rewritten with restore",
+      rewritten("PreToolUse", ROOT, "cd /tmp && cmd", restore("cd /tmp && cmd", ROOT)))
+check("at root: multi-`&&` tail restore appended",
+      rewritten("PreToolUse", ROOT, "cd a && b && c", restore("cd a && b && c", ROOT)))
 check("at root: `cd dir&&ls` (no spaces around &&) rewritten",
-      rewritten("PreToolUse", ROOT, "cd dir&&ls", "(cd dir&&ls)"))
+      rewritten("PreToolUse", ROOT, "cd dir&&ls", restore("cd dir&&ls", ROOT)))
 # Directory names with spaces: quoted or backslash-escaped
 check('at root: `cd "my dir" && ls` (double-quoted, spaced) rewritten',
-      rewritten("PreToolUse", ROOT, 'cd "my dir" && ls', '(cd "my dir" && ls)'))
+      rewritten("PreToolUse", ROOT, 'cd "my dir" && ls', restore('cd "my dir" && ls', ROOT)))
 check("at root: `cd 'my dir' && ls` (single-quoted, spaced) rewritten",
-      rewritten("PreToolUse", ROOT, "cd 'my dir' && ls", "(cd 'my dir' && ls)"))
+      rewritten("PreToolUse", ROOT, "cd 'my dir' && ls", restore("cd 'my dir' && ls", ROOT)))
 check("at root: `cd my\\ dir && ls` (escaped space) rewritten",
-      rewritten("PreToolUse", ROOT, "cd my\\ dir && ls", "(cd my\\ dir && ls)"))
+      rewritten("PreToolUse", ROOT, "cd my\\ dir && ls", restore("cd my\\ dir && ls", ROOT)))
 check("at root: `cd a b && ls` (two barewords, invalid cd) blocked",
       blocked("PreToolUse", ROOT, "cd a b && ls"))
 check("at root: `cd subdir` (no &&) still blocked, not rewritten",
@@ -178,6 +188,21 @@ check("at root: bare `cd && ls` (no path) still blocked",
       blocked("PreToolUse", ROOT, "cd && ls"))
 check("drifted: `cd deeper && ls` blocked, not rewritten (restore first)",
       blocked("PreToolUse", SUB, "cd deeper && ls"))
+
+# The rewrite is a flat list, not a subshell: a trailing heredoc survives, and
+# the appended restore is shell-quoted.
+check("at root: trailing heredoc survives the rewrite",
+      rewritten("PreToolUse", ROOT, "cd sub && cat <<'EOF'\nhi\nEOF",
+                restore("cd sub && cat <<'EOF'\nhi\nEOF", ROOT)))
+check("spaced root: appended restore is quoted",
+      rewritten("PreToolUse", SPACED, "cd sub && ls", f"cd sub && ls\ncd '{SPACED}'", root=SPACED))
+_c, _o, _e = run("PreToolUse", ROOT, "cd sub && ls")
+_hso = json.loads(_o)["hookSpecificOutput"]
+check("rewrite notes do not advertise a subshell",
+      "subshell" not in _hso["additionalContext"].lower()
+      and "subshell" not in json.loads(_o)["systemMessage"].lower())
+check("rewrite agent note says cwd is restored to root",
+      "restor" in _hso["additionalContext"].lower())
 
 # ── FR6: from a drifted cwd, other commands are blocked ─────────────────────
 check("drifted: `ls` blocked", blocked("PreToolUse", SUB, "ls"))
@@ -212,8 +237,8 @@ check("wt: deep drift inside wt blocked, hint names wt root",
       blocked_with("PreToolUse", WTDEEP, "ls", WT, root=PROJ))
 check("wt: `cd WT && cmd` from deep drift allowed",
       allowed("PreToolUse", WTDEEP, f"cd {WT} && pytest", root=PROJ))
-check("wt: at wt root, `cd src && ls` rewritten to subshell",
-      rewritten("PreToolUse", WT, "cd src && ls", "(cd src && ls)", root=PROJ))
+check("wt: at wt root, `cd src && ls` rewritten with restore",
+      rewritten("PreToolUse", WT, "cd src && ls", restore("cd src && ls", WT), root=PROJ))
 
 # Main tree under the same PROJ root behaves normally
 check("main: `ls` at PROJ allowed", allowed("PreToolUse", PROJ, "ls", root=PROJ))
@@ -266,10 +291,10 @@ check("redir: `cd ROOT >o 2>&1 && ls` (two redirs) allowed",
       allowed("PreToolUse", ROOT, f"cd {ROOT} >o 2>&1 && ls"))
 check("redir: `cd ROOT 2>&1 && cmd` restores from drift",
       allowed("PreToolUse", SUB, f"cd {ROOT} 2>&1 && pytest"))
-check("redir: at root `cd subdir 2>&1 && ls` rewritten to subshell",
-      rewritten("PreToolUse", ROOT, "cd subdir 2>&1 && ls", "(cd subdir 2>&1 && ls)"))
-check("redir: at root `cd subdir >out.txt && ls` rewritten to subshell",
-      rewritten("PreToolUse", ROOT, "cd subdir >out.txt && ls", "(cd subdir >out.txt && ls)"))
+check("redir: at root `cd subdir 2>&1 && ls` rewritten with restore",
+      rewritten("PreToolUse", ROOT, "cd subdir 2>&1 && ls", restore("cd subdir 2>&1 && ls", ROOT)))
+check("redir: at root `cd subdir >out.txt && ls` rewritten with restore",
+      rewritten("PreToolUse", ROOT, "cd subdir >out.txt && ls", restore("cd subdir >out.txt && ls", ROOT)))
 # Guardrail: the separator must still be `&&` — a redirect does not license `;`/newline.
 check("redir: `cd ROOT 2>&1; ls` still blocked (only && allowed)",
       blocked("PreToolUse", ROOT, f"cd {ROOT} 2>&1; ls"))
@@ -284,8 +309,12 @@ check("embedded: `echo hi; cd sub` blocked at root",
       blocked("PreToolUse", ROOT, "echo hi; cd sub"))
 check("embedded: newline-joined `pwd\\ncd sub` blocked at root",
       blocked("PreToolUse", ROOT, "pwd\ncd sub"))
-check("embedded: block message offers the subshell form",
-      blocked_with("PreToolUse", ROOT, "mkdir -p t && cd t && ls", "(cd subdir && <command>)"))
+check("embedded: block message offers the `cd <subdir> && <command>` form",
+      blocked_with("PreToolUse", ROOT, "mkdir -p t && cd t && ls", "cd <subdir> && <command>"))
+_c, _o, _e = run("PreToolUse", ROOT, "mkdir -p t && cd t && ls")
+check("block messages never advertise a `( … )` subshell", "(cd" not in _e)
+_c, _o, _e = run("PreToolUse", WT, "cd ..", root=PROJ)
+check("worktree block message never advertises a `( … )` subshell", "(cd" not in _e)
 # The subshell form we recommend everywhere must NOT be caught (paren before cd).
 check("embedded: `mkdir x && (cd x && ls)` subshell allowed",
       allowed("PreToolUse", ROOT, "mkdir x && (cd x && ls)"))
@@ -295,44 +324,41 @@ check("embedded: `foo | cd x` (pipe subshell) allowed",
 check("embedded: quoted `&& cd` literal blocks (documented false positive)",
       blocked("PreToolUse", ROOT, 'echo "x && cd y"'))
 
-# ── FR5c: a `set -e` script with an embedded `cd` is wrapped in a subshell ─────
-# `set -e` gives the same cd-first fail-fast guarantee as `&&` (a failed `cd`
-# aborts the script before the tail runs), so when errexit is enabled by the
-# command's first statement the whole script is safe to scope to a non-persisting
-# subshell — the FR5a `cd <dir> && <cmd>` idiom generalized. This only *replaces*
-# the FR5b block: it fires only when there is an embedded `cd` to catch.
-check("set-e: `set -e\\ncd t\\nmake` wrapped in subshell",
-      rewritten("PreToolUse", ROOT, "set -e\ncd tools\nmake build",
-                "(set -e\ncd tools\nmake build)"))
-check("set-e: `set -euo pipefail; cd b; make` wrapped in subshell",
-      rewritten("PreToolUse", ROOT, "set -euo pipefail; cd build; make",
-                "(set -euo pipefail; cd build; make)"))
-check("set-e: `set -e && cd sub && ls` wrapped in subshell",
-      rewritten("PreToolUse", ROOT, "set -e && cd sub && ls",
-                "(set -e && cd sub && ls)"))
-check("set-e: `set -o errexit` long form wrapped",
-      rewritten("PreToolUse", ROOT, "set -o errexit\ncd x\nmake",
-                "(set -o errexit\ncd x\nmake)"))
-check("set-e: `set -ex` (errexit + xtrace) wrapped",
-      rewritten("PreToolUse", ROOT, "set -ex\ncd x\nmake", "(set -ex\ncd x\nmake)"))
+# ── FR5c: a `set -e` script with an embedded `cd` gets a restore appended ─────
+# A `set -e`-first script is the agent's declared fail-fast intent; `set -e` is
+# inert under the Bash tool, so the appended restore — not errexit — is what
+# keeps cwd at root (decision (l)). This only *replaces* the FR5b block: it fires
+# only when there is an embedded `cd` to catch.
+check("set-e: `set -e\\ncd t\\nmake` restore appended",
+      rewritten("PreToolUse", ROOT, "set -e\ncd tools\nmake build", restore("set -e\ncd tools\nmake build", ROOT)))
+check("set-e: `set -euo pipefail; cd b; make` restore appended",
+      rewritten("PreToolUse", ROOT, "set -euo pipefail; cd build; make", restore("set -euo pipefail; cd build; make", ROOT)))
+check("set-e: `set -e && cd sub && ls` restore appended",
+      rewritten("PreToolUse", ROOT, "set -e && cd sub && ls", restore("set -e && cd sub && ls", ROOT)))
+check("set-e: `set -o errexit` long form restore appended",
+      rewritten("PreToolUse", ROOT, "set -o errexit\ncd x\nmake", restore("set -o errexit\ncd x\nmake", ROOT)))
+check("set-e: `set -ex` (errexit + xtrace) restore appended",
+      rewritten("PreToolUse", ROOT, "set -ex\ncd x\nmake", restore("set -ex\ncd x\nmake", ROOT)))
 check("set-e: leading comment before `set -e` tolerated",
-      rewritten("PreToolUse", ROOT, "# build helper\nset -e\ncd t\nmake",
-                "(# build helper\nset -e\ncd t\nmake)"))
+      rewritten("PreToolUse", ROOT, "# build helper\nset -e\ncd t\nmake", restore("# build helper\nset -e\ncd t\nmake", ROOT)))
 # The rewrite announcement is tailored to the set -e case (agent note present).
 _c, se_out, _e = run("PreToolUse", ROOT, "set -e\ncd t\nmake")
 se_note = _c == 0 and se_out and "set -e" in json.loads(se_out)["hookSpecificOutput"]["additionalContext"]
 check("set-e: agent note mentions set -e", se_note)
+check("set-e: notes do not advertise a subshell",
+      _c == 0 and "subshell" not in json.loads(se_out)["hookSpecificOutput"]["additionalContext"].lower()
+      and "subshell" not in json.loads(se_out)["systemMessage"].lower())
 
 # Exclusions — all fall through to the FR5b block (errexit not guaranteed before cd).
-check("set-e: `set +e` (errexit disabled) blocked, not wrapped",
+check("set-e: `set +e` (errexit disabled) blocked, not restore appended",
       blocked("PreToolUse", ROOT, "set +e\ncd x\nmake"))
-check("set-e: `set -u` (no errexit) blocked, not wrapped",
+check("set-e: `set -u` (no errexit) blocked, not restore appended",
       blocked("PreToolUse", ROOT, "set -u\ncd x\nmake"))
-check("set-e: `set -o pipefail` (no errexit) blocked, not wrapped",
+check("set-e: `set -o pipefail` (no errexit) blocked, not restore appended",
       blocked("PreToolUse", ROOT, "set -o pipefail\ncd x\nmake"))
-check("set-e: bare `set` (prints vars, no errexit) blocked, not wrapped",
+check("set-e: bare `set` (prints vars, no errexit) blocked, not restore appended",
       blocked("PreToolUse", ROOT, "set\ncd x\nmake"))
-check("set-e: `set -e` not first statement blocked, not wrapped",
+check("set-e: `set -e` not first statement blocked, not restore appended",
       blocked("PreToolUse", ROOT, "foo\nset -e\ncd x\nmake"))
 check("set-e: `setup && cd x` not treated as `set` (word boundary)",
       blocked("PreToolUse", ROOT, "setup && cd x && make"))
@@ -344,12 +370,10 @@ check("set-e: drifted `set -e\\ncd x` blocked (restore first)",
       blocked("PreToolUse", SUB, "set -e\ncd x\nmake"))
 # Worktree: wrapped uniformly, including an embedded cd to the main repo (the
 # subshell keeps cwd in the worktree — no cross-root carve-out, unlike FR5a).
-check("set-e wt: `set -e\\ncd src\\nmake` at wt root wrapped",
-      rewritten("PreToolUse", WT, "set -e\ncd src\nmake",
-                "(set -e\ncd src\nmake)", root=PROJ))
-check("set-e wt: embedded `cd MAIN` in a set -e script still wrapped",
-      rewritten("PreToolUse", WT, f"set -e\ncd {PROJ}\ngit log",
-                f"(set -e\ncd {PROJ}\ngit log)", root=PROJ))
+check("set-e wt: `set -e\\ncd src\\nmake` at wt root restore appended",
+      rewritten("PreToolUse", WT, "set -e\ncd src\nmake", restore("set -e\ncd src\nmake", WT), root=PROJ))
+check("set-e wt: embedded `cd MAIN` in a set -e script still restore appended",
+      rewritten("PreToolUse", WT, f"set -e\ncd {PROJ}\ngit log", restore(f"set -e\ncd {PROJ}\ngit log", WT), root=PROJ))
 
 # ── FR: $CLAUDE_PROJECT_DIR is itself a linked worktree → treated as a plain root ─
 # The shape-2 self-destruct guard was removed: its `ExitWorktree` advice was a
@@ -360,11 +384,10 @@ check("set-e wt: embedded `cd MAIN` in a set -e script still wrapped",
 # cross-root block), and drift blocks with a plain `cd <CPD>` hint — no
 # `ExitWorktree`. The now-survivable self-destruct is covered by fail-open below.
 check("cpd-wt: `ls` at CPD=worktree allowed", allowed("PreToolUse", WT, "ls", root=WT))
-check("cpd-wt: `cd src && ls` rewritten to subshell",
-      rewritten("PreToolUse", WT, "cd src && ls", "(cd src && ls)", root=WT))
-check("cpd-wt: `cd MAIN && cmd` rewritten to subshell (no cross-root block)",
-      rewritten("PreToolUse", WT, f"cd {PROJ} && git worktree remove x",
-                f"(cd {PROJ} && git worktree remove x)", root=WT))
+check("cpd-wt: `cd src && ls` rewritten with restore",
+      rewritten("PreToolUse", WT, "cd src && ls", restore("cd src && ls", WT), root=WT))
+check("cpd-wt: `cd MAIN && cmd` rewritten with restore (no cross-root block)",
+      rewritten("PreToolUse", WT, f"cd {PROJ} && git worktree remove x", restore(f"cd {PROJ} && git worktree remove x", WT), root=WT))
 _c, _o, cpd_err = run("PreToolUse", WTSUB, "ls", root=WT)
 check("cpd-wt: drift blocks with plain `cd CPD` hint, no ExitWorktree",
       _c == 2 and WT in cpd_err and "ExitWorktree" not in cpd_err and "worktree" not in cpd_err)

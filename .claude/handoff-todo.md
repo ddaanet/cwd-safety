@@ -1,6 +1,9 @@
+## Open decisions
+
+- Keep `cd-usage-survey.md` (untracked, repo root: the transcript survey with its corrections and scripts) in the repo, move it under `plans/` or `docs/`, or drop it now that the changelog entry `docs/changelog/2026-08-27-restore-line-replaces-subshell.md` carries the numbers.
+
 ## Remaining
 
-- Run a retirement pass on the memory index to bring it under the 24.4 KB loader cap, so entries past the cutoff stop being silently dropped at load. Most of the overflow is inherited from upstream, and merging or dropping entries is a judgement call deliberately kept out of a merge.
-- Process or discard `brief-sandbox-exclusions-relaxation.md`, the last unprocessed brief in the repo root.
-- Decide whether to correct the tier's `cc-worktree-memory-freeze` claim that `ExitWorktree` restores `projectRoot`; it does not for a session that did not enter via `EnterWorktree`. The qualification lives in the project-local `cc-worktree-cwd-shapes`, so the tier still overstates it.
-- Fix the subshell rewrite mangling a trailing heredoc, per `heredoc-safety.txt`: wrap as `(` and a newline before `)` so heredoc syntax survives. Hit live while driving this repo's own hook.
+- Run a retirement pass on the memory index to bring it under the 24.4 KB loader cap (at 107%), so entries past the cutoff stop being silently dropped at load. Most of the overflow is inherited from upstream; merging or dropping entries is a judgement call deliberately kept out of a merge.
+- Dogfood the restore rewrite live: issue a `cd docs && ls -a` from root and confirm cwd stays at root, the announcement reads right, and `$TMPDIR` is unset inside (exclusion preserved); then a trailing-heredoc `cd sub && cat <<'EOF'` case.
+- At release time, replace "(next release)" with the version in the 2026-08-27 changelog index line (`docs/changelog.md`) and the entry's header.

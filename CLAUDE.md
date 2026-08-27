@@ -62,9 +62,14 @@ and runs the test suite. Must be green before committing.
 - **Output channels.** Block = stderr + exit 2. PostToolUse warning =
   non-blocking JSON on stdout. Rewrite (FR5a/FR5c) = exit 0 with an `allow`
   decision plus `hookSpecificOutput.updatedInput`, both triggers through
-  `_rewrite_to_subshell`; the dual-channel announcement is mandatory
+  `_rewrite_with_restore`; the dual-channel announcement is mandatory
   (decision (i)). Never soften agent-facing text into something readable as
   an instruction to bypass.
+- **Never wrap a command in `( … )`, and never recommend that form in a
+  message.** A subshell hides the command from the sandbox `excludedCommands`
+  matcher and mangles a trailing heredoc; the rewrite appends a newline and
+  `cd <E>` instead (decision (i)). `set -e` is inert under the Bash tool
+  (decision (l)) — no rule may rest on errexit.
 - **Effective root is computed once in `main()`**
   (`_worktree_root(cwd, project_dir) or project_dir`) and threaded into both
   handlers. There is no payload field for it (decision (h)).

@@ -11,19 +11,22 @@ enclosing git-worktree root when ``cwd`` is inside a worktree of
 ``$CLAUDE_PROJECT_DIR``, else ``$CLAUDE_PROJECT_DIR``) and current cwd ``W``
 (``cwd`` from hook stdin):
 
-1. ``W == R`` and ``C`` is not a ``cd`` command            → allow silently.
-2. ``C`` is the root-anchored form ``cd R`` or ``cd R && …``→ allow from any W
-   (restores cwd and/or runs a command from root).
-3. Any other leading-``cd`` command (``cd subdir``, ``cd ..``, ``cd -`` …)
+FR3. ``W == R`` and ``C`` is not a ``cd`` command          → allow silently.
+FR4. ``C`` is the root-anchored form ``cd R`` or ``cd R && …`` → allow from
+   any W (restores cwd and/or runs a command from root).
+FR5. Any other leading-``cd`` command (``cd subdir``, ``cd ..``, ``cd -`` …)
    → BLOCK, *even when ``W == R``*. A bare ``cd`` to anywhere but root is the
-   most common cause of drift, so it is stopped before it happens.
-4. ``W != R`` and any other command (drift already happened) → BLOCK with
+   most common cause of drift, so it is stopped before it happens. Two shapes
+   are rewritten instead of blocked, by appending a ``cd R`` restore line:
+   ``cd <dir> && <cmd>`` (FR5a) and a ``set -e``-first script with an embedded
+   ``cd`` (FR5c). An embedded ``cd`` after a top-level separator blocks (FR5b).
+FR6. ``W != R`` and any other command (drift already happened) → BLOCK with
    instructions to restore via ``cd R``.
 
 PostToolUse(Bash):
 
-5. ``W != R`` after a command ran → inject an additionalContext + systemMessage
-   warning. ``W == R`` → silent.
+FR7. ``W != R`` after a command ran → inject an additionalContext +
+   systemMessage warning. ``W == R`` → silent.
 
 Fail-open: if the effective root ``R`` no longer exists on disk (a worktree
 removed out from under the session, say), the guard's contract is unsatisfiable.
@@ -40,6 +43,7 @@ match only — no traversal or normalization.
 import json
 import os
 import re
+import shlex
 import sys
 
 # A command whose first token is the `cd` builtin: `cd`, `cd …`, `cd;…`, `cd&&…`.
@@ -48,7 +52,7 @@ _LEADING_CD = re.compile(r"^cd(?:\s|;|&|$)")
 
 # One shell redirection clause that may follow the `cd` target before the `&&`:
 # `2>&1`, `>f`, `2>>f`, `<f`, `&>f`, `2>/dev/null`, … A redirection does not change
-# the cd-first `&&` semantics, so the root-anchored allow and the subshell rewrite
+# the cd-first `&&` semantics, so the root-anchored allow and the FR5a rewrite
 # must see past it. Each alternative is either an fd-dup (no filename) or a filename
 # token that excludes `& | ; < > ( )` — so nothing here can swallow the `&&`
 # separator or smuggle in a second command. `_REDIRS` is zero or more such clauses,
@@ -90,7 +94,7 @@ _CD_AND = re.compile(
     )
     {_REDIRS}                           # optional redirections on the `cd` (`2>&1`, `>f`, …)
     \s*&&\s*                            # the `&&` separator — only `&&`, never `;`/`||`
-    \S                                 # a non-empty tail to run inside the subshell
+    \S                                 # a non-empty tail to run after the `cd`
     """,
     re.VERBOSE,
 )
@@ -256,47 +260,55 @@ def _block(message: str) -> None:
 
 # FR5a announcements. The rewrite is never silent, but neither channel echoes
 # the command: Claude Code already surfaces the rewritten command (updatedInput),
-# so echoing it again is bloat. The agent note recommends the *wrapped* form for
-# follow-ups — recommending the unwrapped `cd <dir> && <cmd>` would just trigger
-# another rewrite (and another notification).
+# so echoing it again is bloat. The agent note says cwd was restored, so a
+# follow-up that assumed the `cd` persisted is corrected by context.
 _REWRITE_AGENT_NOTE = (
-    "Wrapped your command in a subshell, so the `cd` does not persist and the "
-    "working directory is unchanged. Issue any follow-up commands for that "
-    "directory in the same `(cd <dir> && <command>)` subshell form."
+    "Appended a `cd` back to the effective root, so your `cd` did not persist "
+    "and the working directory is restored. A follow-up command for that "
+    "directory needs its own `cd <dir> && <command>`, an absolute path, or "
+    "`git -C <dir>`."
 )
-_REWRITE_USER_NOTE = "Wrapped command in a subshell."
+_REWRITE_USER_NOTE = "Appended a cd back to root."
 
-# FR5c announcements: a `set -e` script wrapped in a subshell. The agent note
+# FR5c announcements: a `set -e` script with a restore appended. The agent note
 # says `set -e` (so a follow-up that assumed cwd persisted is corrected) and,
-# like FR5a, does not echo the command — Claude Code surfaces the rewrite.
+# like FR5a, does not echo the command — Claude Code surfaces the rewrite. It
+# also says that `set -e` is inert here: the Bash tool evals the command as a
+# non-final `&&` element, so errexit never aborts the script (decision (l)).
 _SET_E_AGENT_NOTE = (
-    "Wrapped your `set -e` script in a subshell, so any `cd` inside it does not "
-    "persist and the working directory is unchanged. Keep multi-directory "
-    "scripts wrapped this way, or run each step from the effective root."
+    "Appended a `cd` back to the effective root to your `set -e` script, so any "
+    "`cd` inside it did not persist and the working directory is restored. Note "
+    "that `set -e` does not abort a Bash tool command; chain with `&&` where a "
+    "step must not run after a failure."
 )
-_SET_E_USER_NOTE = "Wrapped set -e script in a subshell."
+_SET_E_USER_NOTE = "Appended a cd back to root after set -e script."
 
 
-def _rewrite_to_subshell(
-    hook_input: dict, command: str, agent_note: str, user_note: str
+def _rewrite_with_restore(
+    hook_input: dict, command: str, root: str, agent_note: str, user_note: str
 ) -> None:
-    """Allow ``command``, rewritten to a non-persisting subshell, and announce
-    the rewrite on both channels. Exits 0.
+    """Allow ``command`` with a ``cd <root>`` restore line appended, and
+    announce the rewrite on both channels. Exits 0.
 
-    The subshell `( … )` runs the command in a child shell, so the parent's
-    cwd stays at the effective root by construction — no drift to back out of.
+    The restore is a separate line, not a `( … )` subshell: the sandbox's
+    `excludedCommands` matcher only splits `program`/`list`/`pipeline` nodes,
+    so a subshell hides the inner command from an exclusion and downgrades it
+    to a sandboxed run; and a newline (not `;`) keeps a trailing heredoc or
+    comment in ``command`` intact. cwd is therefore restored by a trailing
+    statement, not by construction — a tail that `exec`s or `exit`s skips it,
+    and PostToolUse (FR7) is the backstop for that.
     The rewrite is never silent (agent: additionalContext; user: systemMessage),
     but the notes do not echo the command — Claude Code already surfaces the
     rewritten `updatedInput`. ``agent_note``/``user_note`` are the channel texts
     for the rewrite kind (FR5a `cd <dir> && <cmd>` vs FR5c `set -e` script).
     """
     new_input = dict(hook_input.get("tool_input", {}))
-    new_input["command"] = "(" + command + ")"
+    new_input["command"] = command + "\ncd " + shlex.quote(root)
     output = {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "allow",
-            "permissionDecisionReason": "cd scoped to a non-persisting subshell",
+            "permissionDecisionReason": "cd back to the effective root appended",
             "additionalContext": agent_note,
             "updatedInput": new_input,
         },
@@ -313,18 +325,18 @@ def _cd_block_message(root: str, in_worktree: bool) -> str:
             "❌ Bash command blocked: `cd` away from the active worktree "
             "causes working-directory drift.\n"
             f"Active worktree root: {root}\n"
-            "Instead: use absolute paths, run from the worktree root with "
-            f"`cd {root} && <command>`, or scope the change to a subshell "
-            "that does not persist, e.g. `(cd subdir && <command>)`.\n"
+            "Instead: use absolute paths or `git -C <dir>`, run from the "
+            f"worktree root with `cd {root} && <command>`, or lead with the "
+            "`cd <subdir> && <command>` form (a restore is appended for you).\n"
             "To leave the worktree entirely, use the ExitWorktree tool — not `cd`."
         )
     return (
         "❌ Bash command blocked: `cd` away from project root causes "
         "working-directory drift.\n"
         f"Project root: {root}\n"
-        "Instead: use absolute paths, run from root with "
-        f"`cd {root} && <command>`, or scope the change to a "
-        "subshell that does not persist, e.g. `(cd subdir && <command>)`."
+        "Instead: use absolute paths or `git -C <dir>`, run from root with "
+        f"`cd {root} && <command>`, or lead with the "
+        "`cd <subdir> && <command>` form (a restore is appended for you)."
     )
 
 
@@ -384,10 +396,10 @@ def handle_pretooluse(
     # FR5: any other leading `cd` is drift — block it before it happens,
     # even when already at the effective root.
     if _LEADING_CD.match(command):
-        # FR5a: at the effective root, a `cd <subdir> && <cmd>` is rewritten
-        # to a non-persisting subshell rather than blocked (saves a turn). From
-        # a drifted cwd we still block — the agent must restore root first, since
-        # a subshell from the wrong cwd would run the command from the wrong cwd.
+        # FR5a: at the effective root, a `cd <subdir> && <cmd>` gets a `cd root`
+        # restore appended rather than blocked (saves a turn). From a drifted
+        # cwd we still block — the agent must restore root first, since the
+        # command would run from the wrong cwd.
         # A `cd` to the main project root while a worktree is active is a
         # cross-root transition (governed by ExitWorktree, decision (h)), not a
         # subdir descent — never rewrite it; fall through to the worktree block.
@@ -395,8 +407,8 @@ def handle_pretooluse(
         # excluded just as a bare one is.
         target = _cd_and_target(command)
         if target and cwd == root and not (in_worktree and target == project_dir):
-            _rewrite_to_subshell(
-                hook_input, command, _REWRITE_AGENT_NOTE, _REWRITE_USER_NOTE
+            _rewrite_with_restore(
+                hook_input, command, root, _REWRITE_AGENT_NOTE, _REWRITE_USER_NOTE
             )
         _block(_cd_block_message(root, in_worktree))
 
@@ -404,22 +416,20 @@ def handle_pretooluse(
     # smuggles a drift-inducing `cd` after a top-level separator (`mkdir && cd
     # sub && …`, FR5b). A leading/bare `cd` was already handled by FR5; this
     # catches the embedded case that would otherwise drift and only be caught
-    # after the fact by PostToolUse. The `(cd sub && …)` subshell form is never
-    # matched (the `cd` does not immediately follow the separator), so the
-    # sanctioned escape hatch still works. The block reuses the FR5 message,
-    # which already recommends that subshell form.
+    # after the fact by PostToolUse. A `(cd sub && …)` subshell is never matched
+    # (the `cd` does not immediately follow the separator). The block reuses the
+    # FR5 message, which recommends the leading `cd <subdir> && <command>` form.
     if cwd == root:
         if _EMBEDDED_CD.search(command):
-            # FR5c: a `set -e` script (errexit enabled by the first statement)
-            # is safe to scope to a non-persisting subshell instead of blocked —
-            # errexit gives the same cd-first guarantee as `&&` (a failed `cd`
-            # aborts before the tail runs), so the embedded `cd` cannot drift and
-            # cannot run the tail from the wrong cwd. Generalizes FR5a from a
-            # single `cd <dir> && <cmd>` to a whole fail-fast script. Fires only
-            # here, where an embedded `cd` would otherwise block (FR5b).
+            # FR5c: a `set -e`-first script gets a `cd root` restore appended
+            # instead of blocked. The `set -e` is the agent's declared
+            # fail-fast intent, but it is inert under the Bash tool (the command
+            # is eval'd as a non-final `&&` element), so the restore line — not
+            # errexit — is what keeps cwd at root. Fires only here, where an
+            # embedded `cd` would otherwise block (FR5b). See decision (l).
             if _starts_with_errexit(command):
-                _rewrite_to_subshell(
-                    hook_input, command, _SET_E_AGENT_NOTE, _SET_E_USER_NOTE
+                _rewrite_with_restore(
+                    hook_input, command, root, _SET_E_AGENT_NOTE, _SET_E_USER_NOTE
                 )
             _block(_cd_block_message(root, in_worktree))
         sys.exit(0)
