@@ -27,8 +27,8 @@ current working directory `W`:
 |-----------|----------|
 | At root (`W == E`), command isn't a `cd` | **allow** silently |
 | `cd E` or `cd E && <cmd>` (root-anchored) | **allow** from anywhere |
-| At root (`W == E`), `cd <subdir> && <cmd>` | **rewrite** to a subshell `(cd <subdir> && <cmd>)`, then allow |
-| At root (`W == E`), a `set -e` script whose first statement enables errexit, with an embedded `cd` | **rewrite** the whole script to a subshell `(<script>)`, then allow |
+| At root (`W == E`), `cd <subdir> && <cmd>` | **rewrite** — append a newline and `cd <E>`, then allow |
+| At root (`W == E`), a `set -e` script whose first statement enables errexit, with an embedded `cd` | **rewrite** — append the same restore line, then allow |
 | Any other leading `cd` (bare `cd subdir`, `cd ..`, `cd -`, `;`/`\|\|` tails) | **block** — even at root |
 | Drifted (`W != E`), any other command | **block**, with the restore command |
 | `PostToolUse` and drifted (`W != E`) | **warn** (agent + user channels) |
@@ -36,12 +36,16 @@ current working directory `W`:
 The pre-use side stops drift *before* it happens — a bare `cd <subdir>`
 is the most common cause, so it's refused outright, even from root. The
 ergonomic exceptions are both at root: a `cd <subdir> && <cmd>`, and a
-`set -e` script with an embedded `cd` (errexit makes a failed `cd` abort
-the script, the same cd-first guarantee `&&` gives), are each rewritten in
-place to a non-persisting subshell and allowed (announced on both
-channels), sparing the agent a block-then-reissue turn without letting cwd
-move. The post-use side is a backstop that warns after drift the pre-use
-gate can't intercept (e.g. `pushd`).
+`set -e` script with an embedded `cd`, are each rewritten in place — a
+newline and `cd <E>` appended, so the directory change doesn't outlive the
+command — and allowed (announced on both channels), sparing the agent a
+block-then-reissue turn without letting cwd move. The restore is a trailing
+line rather than a wrapper: wrapping hides the command from the sandbox's
+`excludedCommands` matcher and mangles a trailing heredoc. For the second
+form `set -e` is only the trigger, not the guarantee — errexit is inert
+under the Bash tool, so it is the appended restore that keeps cwd at `E`.
+The post-use side is a backstop that warns after drift the pre-use gate
+can't intercept (e.g. `pushd`).
 
 ### Worktrees
 
@@ -57,10 +61,10 @@ $CLAUDE_PROJECT_DIR`) to prevent silent drift out of the worktree.
 
 - **Run from root in one line:** `cd /path/to/root && <command>` — the
   `&&` guarantees the command runs only if the `cd` succeeds.
-- **Touch a subdirectory without drifting:** use a subshell,
-  `(cd subdir && <command>)` — the directory change doesn't persist, so
-  it's allowed. At root, a bare `cd subdir && <command>` is rewritten
-  into this subshell form automatically.
+- **Touch a subdirectory without drifting:** from root, write
+  `cd subdir && <command>` — the guard appends a `cd` back to root, so the
+  directory change doesn't persist. A follow-up command for that directory
+  needs its own `cd subdir && <command>`, an absolute path, or `git -C`.
 - **Restore after drift:** `cd /path/to/root`.
 
 Path matching is exact — the `cd` target must equal the effective root

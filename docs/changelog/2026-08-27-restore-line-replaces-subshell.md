@@ -1,4 +1,4 @@
-# 2026-08-27 — The rewrite appends a `cd` back to root instead of wrapping in a subshell (next release)
+# 2026-08-27 — The rewrite appends a `cd` back to root instead of wrapping in a subshell
 
 The [subshell rewrite](2026-06-12-subshell-rewrite.md) and the
 [`set -e` wrap](2026-07-17-set-e-subshell-wrap.md) both produced `( … )`. Both

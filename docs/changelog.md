@@ -8,7 +8,7 @@ overturned, it is rewritten in place and the reversal gets an entry here.
 
 Newest first.
 
-- [2026-08-27 — Restore line replaces the subshell](changelog/2026-08-27-restore-line-replaces-subshell.md) — `( … )` defeats the sandbox exclusion matcher and mangles a trailing heredoc, and `set -e` is inert under the Bash tool; the rewrite now appends a newline and `cd <E>` (next release)
+- [2026-08-27 — Restore line replaces the subshell](changelog/2026-08-27-restore-line-replaces-subshell.md) — `( … )` defeats the sandbox exclusion matcher and mangles a trailing heredoc, and `set -e` is inert under the Bash tool; the rewrite now appends a newline and `cd <E>`
 - [2026-07-17 — `set -e` subshell wrap](changelog/2026-07-17-set-e-subshell-wrap.md) — errexit gives the same cd-first guarantee `&&` does, so a fail-fast script is as safe to wrap as the one-liner (v0.4.0)
 - [2026-07-14 — Fail open on a deleted root](changelog/2026-07-14-fail-open-deleted-root.md) — once `E` is gone the guard's contract is unsatisfiable, so it steps aside; the shape-2 self-destruct guard is dropped (v0.3.1)
 - [2026-07-12 — Redirect tolerance and the embedded-`cd` block](changelog/2026-07-12-redirect-tolerance-and-embedded-cd.md) — three defects surfaced by a background worktree session that deleted its own cwd (v0.3.1)

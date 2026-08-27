@@ -6,4 +6,3 @@
 
 - Run a retirement pass on the memory index to bring it under the 24.4 KB loader cap (at 107%), so entries past the cutoff stop being silently dropped at load. Most of the overflow is inherited from upstream; merging or dropping entries is a judgement call deliberately kept out of a merge.
 - Dogfood the restore rewrite live: issue a `cd docs && ls -a` from root and confirm cwd stays at root, the announcement reads right, and `$TMPDIR` is unset inside (exclusion preserved); then a trailing-heredoc `cd sub && cat <<'EOF'` case.
-- At release time, replace "(next release)" with the version in the 2026-08-27 changelog index line (`docs/changelog.md`) and the entry's header.
