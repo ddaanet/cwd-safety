@@ -1,0 +1,12 @@
+# Only MD013 with reflow: rumdl is used as a prose wrapper, not a linter.
+# Wrapping keeps line counts honest in docs/ and plans/ (`just format-docs`).
+# Headings, code and tables are not wrapped, so they are not reported either.
+[global]
+enable = ["MD013"]
+
+[MD013]
+line-length = 80
+reflow = true
+headings = false
+code-blocks = false
+tables = false

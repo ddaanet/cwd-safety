@@ -1,0 +1,12 @@
+# Dev tooling only; nothing here is a Python package. `uv sync` materializes
+# `.venv/bin`, which `.envrc` puts on PATH. rumdl hard-wraps the docs so that
+# the 400-line cap `just check-docs` enforces measures content, not wrapping.
+[project]
+name = "cwd-safety-dev"
+version = "0"
+requires-python = ">=3.9"
+
+[dependency-groups]
+dev = ["rumdl==0.2.60"]
+[tool.uv]
+package = false

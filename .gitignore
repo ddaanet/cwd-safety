@@ -8,3 +8,6 @@ __pycache__/
 
 .claude/settings.local.json
 .claude/handoff-session
+
+# uv dev tooling (`uv sync`), see pyproject.toml.
+.venv/

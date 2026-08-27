@@ -35,12 +35,12 @@ Established from the in-session tool schemas and, decisively, from capturing a
    `permission_mode`, `hook_event_name`, `tool_name`, `tool_input`,
    `tool_use_id`, plus `effort` (top-level) or `agent_id` + `agent_type`
    (subagents). The only directory signal is `cwd`.
-3. **Managed worktrees live under `$CLAUDE_PROJECT_DIR/.claude/worktrees/<name>/`
-   by default**, but `EnterWorktree` can enter an existing worktree at an
-   **arbitrary path** (anything in `git worktree list`, e.g. `git worktree add
-   ../sibling`), and the location is relocatable via a `WorktreeCreate` hook.
-   So a path-prefix heuristic on `.claude/worktrees/` would miss real
-   worktrees.
+3. **Managed worktrees live under
+   `$CLAUDE_PROJECT_DIR/.claude/worktrees/<name>/` by default**, but
+   `EnterWorktree` can enter an existing worktree at an **arbitrary path**
+   (anything in `git worktree list`, e.g. `git worktree add ../sibling`), and
+   the location is relocatable via a `WorktreeCreate` hook. So a path-prefix
+   heuristic on `.claude/worktrees/` would miss real worktrees.
 4. **A hook cannot set the Bash tool's cwd.** Hook output can block, modify the
    command string (`updatedInput`), or emit context — there is no output field
    that redirects the working directory. The guard must remain block/warn; it

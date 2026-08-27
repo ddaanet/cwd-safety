@@ -45,9 +45,9 @@ A newline before the restore fixes it; a `;` would not.
 
 Probing whether the Bash tool still persists cwd (it does — the wrapper is
 `bash -c "source <snapshot> || true && … && eval '<command>' && pwd -P >| /tmp/claude-<uid>/cwd-<id>"`,
-and the trailing `pwd -P` is the capture) showed that `set -e` never aborts:
-the `eval` is a non-final `&&` element, so errexit is ignored inside it, and
-bash extends that to nested subshells. The FR5c rewrite
+and the trailing `pwd -P` is the capture) showed that `set -e` never aborts: the
+`eval` is a non-final `&&` element, so errexit is ignored inside it, and bash
+extends that to nested subshells. The FR5c rewrite
 `(set -e`⏎`cd /nonexistent`⏎`echo TAIL)` printed `TAIL` from root.
 
 Decision (l) rested on errexit giving the cd-first guarantee `&&` gives. It

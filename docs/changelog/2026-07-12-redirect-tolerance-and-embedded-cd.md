@@ -1,10 +1,10 @@
 # 2026-07-12 — Redirect tolerance and the narrow embedded-`cd` block (v0.3.1)
 
-Session `5935efe7` — a background worktree session with `$CLAUDE_PROJECT_DIR` set
-to the worktree path — put the guard under sustained pressure once its cwd was
-deleted, and the agent repeatedly wrote natural command shapes the matchers
-mishandled. Three defects were fixed here (`d8b6a3a`); the third was reversed two
-days later, see
+Session `5935efe7` — a background worktree session with `$CLAUDE_PROJECT_DIR`
+set to the worktree path — put the guard under sustained pressure once its cwd
+was deleted, and the agent repeatedly wrote natural command shapes the matchers
+mishandled. Three defects were fixed here (`d8b6a3a`); the third was reversed
+two days later, see
 [2026-07-14 — fail open](2026-07-14-fail-open-deleted-root.md).
 
 ## 1. Redirections between the `cd` target and the `&&`
@@ -15,11 +15,11 @@ cannot change the cd-first guarantee `&&` provides (the tail still runs only if
 the `cd` succeeds), so tolerating it is free on the security axis. Both the
 root-anchored allow and the subshell rewrite now accept them.
 
-The redirection grammar is deliberately bounded — an fd-dup (`2>&1`, no filename)
-or a filename token that excludes `& | ; < > ( )` — so it can never swallow the
-`&&` or introduce a second command. A non-`&&` separator still blocks
-(`cd E 2>&1; <cmd>`), and the exact path match is untouched: the redirections sit
-*after* the exactly-matched path.
+The redirection grammar is deliberately bounded — an fd-dup (`2>&1`, no
+filename) or a filename token that excludes `& | ; < > ( )` — so it can never
+swallow the `&&` or introduce a second command. A non-`&&` separator still
+blocks (`cd E 2>&1; <cmd>`), and the exact path match is untouched: the
+redirections sit *after* the exactly-matched path.
 
 Allowing arbitrary tokens (not just redirections) before the `&&` was considered
 and rejected — junk like `cd E ; rm && cmd` would break the cd-first invariant.
@@ -48,8 +48,9 @@ regex cannot see.
 
 Rewriting the embedded `cd` into a subshell instead of blocking was considered
 and rejected: correctly splitting a chain around quotes and nested subshells
-needs a real parser. Leaving it entirely to `PostToolUse` was also rejected — the
-drift executes at least one command from the wrong cwd before the warning fires.
+needs a real parser. Leaving it entirely to `PostToolUse` was also rejected —
+the drift executes at least one command from the wrong cwd before the warning
+fires.
 
 ## 3. `_worktree_main_root` — the CPD-is-worktree guard (since reverted)
 

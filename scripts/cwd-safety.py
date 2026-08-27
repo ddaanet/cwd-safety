@@ -242,9 +242,10 @@ def _starts_with_errexit(command: str) -> bool:
     disable errexit and do not match; a ``set`` without errexit (``set -u``,
     ``set -o pipefail``, bare ``set``) does not match either. Only the first
     statement's own options are inspected — bounded to the first top-level
-    separator — so errexit is guaranteed active before any later ``cd``. With
-    that guarantee a failed ``cd`` aborts the script, exactly as ``&&`` would
-    (see DESIGN FR5c / decision (l)); ``set`` is matched with ``\\b`` so
+    separator. The ``set -e`` is the rewrite's trigger, not a guarantee:
+    errexit is inert under the Bash tool, and the appended restore is what
+    keeps cwd at the root (see DESIGN FR5c / decision (l),
+    docs/references/restore-rewrite.md); ``set`` is matched with ``\\b`` so
     ``setup`` is not mistaken for it.
     """
     head = command[_LEADING_SKIP.match(command).end():]

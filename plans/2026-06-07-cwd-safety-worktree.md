@@ -1,12 +1,21 @@
 # cwd-safety worktree support — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development. Steps use checkbox (`- [ ]`) syntax.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use
+> superpowers:subagent-driven-development. Steps use checkbox (`- [ ]`) syntax.
 
-**Goal:** Make the `cwd-safety` hook treat an active git worktree as the working-directory anchor, instead of blocking every command issued from it.
+**Goal:** Make the `cwd-safety` hook treat an active git worktree as the
+working-directory anchor, instead of blocking every command issued from it.
 
-**Architecture:** A single *effective root* `E = (enclosing git-worktree root, if cwd is inside a worktree of $CLAUDE_PROJECT_DIR) else $CLAUDE_PROJECT_DIR`, computed in `main()` and threaded into both handlers in place of the project dir. **Detection is filesystem-based** (read the `.git` linkage) — there is no payload field (verified, see Task 1). When cwd is not in a worktree of the project, behavior is byte-for-byte identical to today.
+**Architecture:** A single *effective root*
+`E = (enclosing git-worktree root, if cwd is inside a worktree of $CLAUDE_PROJECT_DIR) else $CLAUDE_PROJECT_DIR`,
+computed in `main()` and threaded into both handlers in place of the project
+dir. **Detection is filesystem-based** (read the `.git` linkage) — there is no
+payload field (verified, see Task 1). When cwd is not in a worktree of the
+project, behavior is byte-for-byte identical to today.
 
-**Tech Stack:** Python 3 stdlib only (`json`, `os`, `re`, `sys`). Tests: stdlib subprocess driver + real temp `.git` fixtures (no pytest). Gate: `just precommit`.
+**Tech Stack:** Python 3 stdlib only (`json`, `os`, `re`, `sys`). Tests: stdlib
+subprocess driver + real temp `.git` fixtures (no pytest). Gate:
+`just precommit`.
 
 **Spec:** `plans/2026-06-07-cwd-safety-worktree-design.md`
 
@@ -14,27 +23,41 @@
 
 ## Task 1 — Verify the worktree signal (DONE)
 
-Ran the empirical gate: captured a real PreToolUse payload from inside an `isolation: "worktree"` subagent via a temporary capture hook. **Finding: there is NO `worktree` field** in the payload (the earlier web-sourced claim was confabulated). Detection must come from the filesystem. All probe artifacts removed. This finding drives Tasks 3+.
+Ran the empirical gate: captured a real PreToolUse payload from inside an
+`isolation: "worktree"` subagent via a temporary capture hook.
+**Finding: there is NO `worktree` field** in the payload (the earlier
+web-sourced claim was confabulated). Detection must come from the filesystem.
+All probe artifacts removed. This finding drives Tasks 3+.
 
 ## Task 2 — Effective-root plumbing (DONE, commit `71b02e1`)
 
-Introduced `effective_root`/`in_worktree`, threaded them through `handle_pretooluse`/`handle_posttooluse`, renamed `_is_cd_to_root`'s param to `root`, and extracted three message helpers (`_cd_block_message`, `_drift_block_message`, `_drift_warn_message`) carrying `in_worktree`. **Superseded parts:** the detection line `worktree = hook_input.get("worktree") or ""` (Task 3 replaces it) and the field-injection test cases (Task 3 rewrites them). The plumbing itself is correct and reused.
+Introduced `effective_root`/`in_worktree`, threaded them through
+`handle_pretooluse`/`handle_posttooluse`, renamed `_is_cd_to_root`'s param to
+`root`, and extracted three message helpers (`_cd_block_message`,
+`_drift_block_message`, `_drift_warn_message`) carrying `in_worktree`.
+**Superseded parts:** the detection line
+`worktree = hook_input.get("worktree") or ""` (Task 3 replaces it) and the
+field-injection test cases (Task 3 rewrites them). The plumbing itself is
+correct and reused.
 
 ---
 
 ### Task 3: Filesystem worktree detection
 
-Replace the payload-field detection with a filesystem git-worktree check, and rewrite the worktree tests to use real on-disk fixtures.
+Replace the payload-field detection with a filesystem git-worktree check, and
+rewrite the worktree tests to use real on-disk fixtures.
 
 **Files:**
 - Modify: `scripts/cwd-safety.py`
 - Modify: `tests/test_cwd_safety.py`
 
-- [ ] **Step 1: Rewrite the worktree tests to use real fixtures (failing first)**
+- [ ] **Step 1: Rewrite the worktree tests to use real fixtures (failing
+      first)**
 
 In `tests/test_cwd_safety.py`:
 
-(a) Add `tempfile`, `atexit`, `shutil` to the imports (they currently are `json, os, subprocess, sys`):
+(a) Add `tempfile`, `atexit`, `shutil` to the imports (they currently are
+`json, os, subprocess, sys`):
 
 ```python
 import atexit
@@ -46,7 +69,9 @@ import sys
 import tempfile
 ```
 
-(b) Replace the constants block (current lines ~16-23, from `ROOT = ...` through the `HOOK = ...` line, including the `WT`/`WTSUB`/`_UNSET` lines added in Task 2) with:
+(b) Replace the constants block (current lines ~16-23, from `ROOT = ...` through
+the `HOOK = ...` line, including the `WT`/`WTSUB`/`_UNSET` lines added in Task
+2) with:
 
 ```python
 ROOT = "/project/root"  # pretend $CLAUDE_PROJECT_DIR for the non-worktree cases
@@ -77,7 +102,8 @@ with open(os.path.join(EVIL, ".git"), "w") as _f:
     _f.write("gitdir: " + os.path.join(_TMP, "elsewhere", ".git", "worktrees", "x") + "\n")
 ```
 
-(c) Replace the `run`/`allowed`/`blocked`/`blocked_with` definitions (Task 2 gave them a `worktree=_UNSET` param) so they take `root=ROOT` instead:
+(c) Replace the `run`/`allowed`/`blocked`/`blocked_with` definitions (Task 2
+gave them a `worktree=_UNSET` param) so they take `root=ROOT` instead:
 
 ```python
 def run(event, cwd, command="", root=ROOT):
@@ -126,7 +152,9 @@ def blocked_with(event, cwd, command, needle, root=ROOT):
 
 Keep the `_fails = 0` line that precedes these (do not remove it).
 
-(d) Replace the entire worktree test region added in Task 2 (the `# ── Worktree: ...` block through the `# ── Fallback: ...` block, current lines ~115-140) with:
+(d) Replace the entire worktree test region added in Task 2 (the
+`# ── Worktree: ...` block through the `# ── Fallback: ...` block, current lines
+~115-140) with:
 
 ```python
 # ── Worktree (filesystem-detected): worktree root is the effective anchor ────
@@ -163,12 +191,14 @@ check("wt: PostToolUse drift inside wt warns", wt_warned)
 
 - [ ] **Step 2: Run the suite — confirm the new worktree tests fail**
 
-Run: `python3 tests/test_cwd_safety.py`
-Expected: FAIL. The hook still calls `hook_input.get("worktree")` (always None now), so `E == PROJ` and the `WT`-cwd "allowed" cases fail. The pre-existing Rule 1–5 fake-path tests still pass.
+Run: `python3 tests/test_cwd_safety.py` Expected: FAIL. The hook still calls
+`hook_input.get("worktree")` (always None now), so `E == PROJ` and the `WT`-cwd
+"allowed" cases fail. The pre-existing Rule 1–5 fake-path tests still pass.
 
 - [ ] **Step 3: Add the detection helpers to `scripts/cwd-safety.py`**
 
-Insert these three helpers after the `_LEADING_CD` definition (after line ~39) and before `main()`:
+Insert these three helpers after the `_LEADING_CD` definition (after line ~39)
+and before `main()`:
 
 ```python
 def _is_under(path: str, parent: str) -> bool:
@@ -255,7 +285,8 @@ with:
     in_worktree = bool(worktree)
 ```
 
-Also update the `main()` docstring (it currently says "the active worktree root when Claude Code reports one (the ``worktree`` field …)"):
+Also update the `main()` docstring (it currently says "the active worktree root
+when Claude Code reports one (the ``worktree`` field …)"):
 
 ```python
     """Dispatch on hook event; the effective root is always allowed.
@@ -266,7 +297,8 @@ Also update the `main()` docstring (it currently says "the active worktree root 
     """
 ```
 
-And update the module docstring lines 9-10 (which name `R` as `($CLAUDE_PROJECT_DIR)`):
+And update the module docstring lines 9-10 (which name `R` as
+`($CLAUDE_PROJECT_DIR)`):
 
 ```python
 PreToolUse(Bash) — decided against command ``C``, effective root ``R`` (the
@@ -277,8 +309,10 @@ enclosing git-worktree root when ``cwd`` is inside a worktree of
 
 - [ ] **Step 5: Run the suite — confirm all pass**
 
-Run: `python3 tests/test_cwd_safety.py`
-Expected: PASS — `all tests passed`. Worktree cases detected via the fixtures; the two guard cases (foreign `.git` dir, spoofed `.git` file) correctly fall back to `E == PROJ` and block; all pre-existing tests still pass.
+Run: `python3 tests/test_cwd_safety.py` Expected: PASS — `all tests passed`.
+Worktree cases detected via the fixtures; the two guard cases (foreign `.git`
+dir, spoofed `.git` file) correctly fall back to `E == PROJ` and block; all
+pre-existing tests still pass.
 
 - [ ] **Step 6: Commit**
 
@@ -291,7 +325,8 @@ git commit -m "feat: detect git worktree root from the filesystem"
 
 ### Task 4: Worktree-aware messages
 
-Make the block/warn text say "active worktree root" and tell the agent to use `ExitWorktree` (not `cd`) to leave, when a worktree is active.
+Make the block/warn text say "active worktree root" and tell the agent to use
+`ExitWorktree` (not `cd`) to leave, when a worktree is active.
 
 **Files:**
 - Modify: `tests/test_cwd_safety.py`
@@ -321,8 +356,8 @@ check("no wt: cd-block message omits ExitWorktree", "ExitWorktree" not in err_no
 
 - [ ] **Step 2: Run the suite — confirm the new tests fail**
 
-Run: `python3 tests/test_cwd_safety.py`
-Expected: FAIL — current helpers ignore `in_worktree`; the non-worktree check passes.
+Run: `python3 tests/test_cwd_safety.py` Expected: FAIL — current helpers ignore
+`in_worktree`; the non-worktree check passes.
 
 - [ ] **Step 3: Implement worktree-aware branches in the three helpers**
 
@@ -434,7 +469,8 @@ decisions below are made against `E`.
 
 - [ ] **Step 2: Restate FR3–FR7 against `E`**
 
-Change `W == R` / `W != R` / "project root `R`" in FR3–FR7 to use `E`. Add to FR5 (proactive cd block):
+Change `W == R` / `W != R` / "project root `R`" in FR3–FR7 to use `E`. Add to
+FR5 (proactive cd block):
 
 ```markdown
 When a worktree is active, this includes a `cd` back to `$CLAUDE_PROJECT_DIR`:
@@ -444,7 +480,9 @@ block message is worktree-aware and names `ExitWorktree`.
 
 - [ ] **Step 3: Relax NFR1 and NFR3 in `DESIGN.md`**
 
-NFR1 (determinism) and NFR3 (zero runtime dependencies / no I/O) currently forbid I/O beyond the std streams. Append to each (do not delete the existing text):
+NFR1 (determinism) and NFR3 (zero runtime dependencies / no I/O) currently
+forbid I/O beyond the std streams. Append to each (do not delete the existing
+text):
 
 To NFR1:
 
@@ -523,7 +561,8 @@ warn messages are worktree-aware. See decision (h).
 
 - [ ] **Step 6: Update `CLAUDE.md`**
 
-In "The behavioral contract", replace the opening sentence with one introducing the effective root:
+In "The behavioral contract", replace the opening sentence with one introducing
+the effective root:
 
 ```markdown
 Canonical statement lives in `DESIGN.md` (FR1–FR9). In short, at
@@ -532,7 +571,8 @@ when `cwd` is inside a worktree of `$CLAUDE_PROJECT_DIR`, detected from the
 on-disk `.git` linkage, else `$CLAUDE_PROJECT_DIR`) and cwd `W`:
 ```
 
-Change the four numbered contract lines so each `R` reads `E`, and append to item 3:
+Change the four numbered contract lines so each `R` reads `E`, and append to
+item 3:
 
 ```markdown
    When a worktree is active this includes `cd $CLAUDE_PROJECT_DIR` — leave a
@@ -562,6 +602,16 @@ git commit -m "docs: document filesystem worktree detection"
 
 ## Self-review notes
 
-- **Spec coverage:** filesystem detection helpers (Task 3) · single effective root + `E` plumbing (Task 2, reused) · `cd`-to-main blocked while active (Task 3 tests + Rule 3) · detection guards for foreign/spoofed `.git` (Task 3 tests) · worktree-aware messages (Task 4) · verification finding (Task 1) · NFR relaxation + decision (h) (Task 6) · DESIGN.md + CLAUDE.md (Task 6).
-- **No regression:** non-worktree branch of every message is the current wording verbatim; pre-existing fake-path tests use no fixtures and still pass because `_worktree_root` returns "" (reaches project_dir / finds no `.git`).
-- **Name consistency:** `_worktree_root(cwd, project_dir)`, `_read_gitdir(dotgit_file)`, `_is_under(path, parent)`, `effective_root`/`in_worktree`, test helpers `run/allowed/blocked/blocked_with(..., root=ROOT)`, fixtures `PROJ/WT/WTSUB/PROJSUB/OTHER/EVIL`.
+- **Spec coverage:** filesystem detection helpers (Task 3) · single effective
+  root + `E` plumbing (Task 2, reused) · `cd`-to-main blocked while active (Task
+  3 tests + Rule 3) · detection guards for foreign/spoofed `.git` (Task 3 tests)
+  · worktree-aware messages (Task 4) · verification finding (Task 1) · NFR
+  relaxation + decision (h) (Task 6) · DESIGN.md + CLAUDE.md (Task 6).
+- **No regression:** non-worktree branch of every message is the current wording
+  verbatim; pre-existing fake-path tests use no fixtures and still pass because
+  `_worktree_root` returns "" (reaches project_dir / finds no `.git`).
+- **Name consistency:** `_worktree_root(cwd, project_dir)`,
+  `_read_gitdir(dotgit_file)`, `_is_under(path, parent)`,
+  `effective_root`/`in_worktree`, test helpers
+  `run/allowed/blocked/blocked_with(..., root=ROOT)`, fixtures
+  `PROJ/WT/WTSUB/PROJSUB/OTHER/EVIL`.

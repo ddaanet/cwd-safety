@@ -12,6 +12,24 @@ hook that keeps the agent's working directory at project root.
 their FR identifier (`FR5a`, `FR7a`) everywhere — code comments, tests,
 changelog entries, briefs — never by any other numbering.
 
+`docs/design.md` is a hub: its requirements and decisions conclude, and the
+`docs/references/` node each one names holds the mechanism, the argument and
+the rejected alternatives. **Read the node before making a claim about, or
+editing, anything in its column** — the hub alone is not enough to change a
+matcher, the rewrite, or worktree handling without re-litigating a settled
+call:
+
+| Touching                                                              | Read first                          |
+|-----------------------------------------------------------------------|-------------------------------------|
+| `_is_cd_to_root`, `_LEADING_CD`, `_CD_AND`, `_REDIR*`, `_EMBEDDED_CD`, `_SET_ERREXIT`; FR4, FR5, FR5b; decisions (c), (d), (j) | `docs/references/matchers.md` |
+| `_worktree_root`, `_read_gitdir`, `_is_under`, `_root_gone_message`; FR2, FR7a; decisions (h), (k) | `docs/references/worktrees.md` |
+| `_rewrite_with_restore`, the `_REWRITE_*`/`_SET_E_*` notes; FR5a, FR5c; decisions (i), (l) | `docs/references/restore-rewrite.md` |
+
+A design change edits the hub's conclusion line *and* the node's argument in
+the same commit; `just check-docs` keeps every file under 400 wrapped lines
+and every link resolving, so an oversized hub means moving a mechanism into a
+node, not trimming its argument.
+
 ## Layout
 
 - `scripts/cwd-safety.py` — the hook. Reads the hook JSON from stdin,
@@ -23,10 +41,15 @@ changelog entries, briefs — never by any other numbering.
 - `tests/test_cwd_safety.py` — drives the hook as a subprocess with
   crafted JSON, asserting exit code and streams for every contract rule.
   Stdlib only (no pytest).
-- `docs/design.md` — living rationale for every design decision (FR/NFR list,
-  decisions (a)–(l), limitations). States what the plugin *is*, in the present
-  tense. When a decision is overturned it is rewritten here in place — never
-  struck through, never annotated with "formerly".
+- `docs/design.md` — living design, the hub: FR/NFR list, the decisions that
+  shape the guard, one conclusion line per decision argued elsewhere,
+  limitations. States what the plugin *is*, in the present tense. When a
+  decision is overturned it is rewritten in place — never struck through,
+  never annotated with "formerly".
+- `docs/references/` — one node per mechanism (`matchers.md`, `worktrees.md`,
+  `restore-rewrite.md`), each holding the detail, the decisions' full
+  rationale and the rejected alternatives behind a hub section. Same
+  present-tense rule.
 - `docs/changelog.md` — index of write-time records, newest first, one line per
   entry. Bodies live in `docs/changelog/YYYY-MM-DD-slug.md` and are **never
   revised**: a dated record is correct forever precisely because it is dated.
@@ -35,6 +58,8 @@ changelog entries, briefs — never by any other numbering.
   what is true now.
 - `plugin-dev/` — vendored `claude-plugin-dev` toolkit (release recipe +
   version-guard hook).
+- `pyproject.toml` / `.venv/` — dev tooling only (rumdl, pinned). `uv sync`
+  once; `.envrc` puts `.venv/bin` on PATH. Nothing here ships.
 - `memory/` — gitlore submodule (remote `cwd-safety-gitlore-memory`) holding
   the agent's auto-memory. gitlore's commit/push hooks sync it; don't `git add`
   or commit memory content into the parent repo by hand. After a fresh
@@ -46,8 +71,12 @@ changelog entries, briefs — never by any other numbering.
 just precommit
 ```
 
-Validates the manifest and `hooks.json`, byte-compiles the hook and test,
-and runs the test suite. Must be green before committing.
+Hard-wraps `docs/` and `plans/` with rumdl (`format-docs`), checks the docs
+graph's line cap and links (`check-docs`), validates the manifest and
+`hooks.json`, byte-compiles the hook and test, and runs the test suite. Must
+be green before committing. Needs `uv sync` once and direnv (`.envrc`) for
+rumdl; under the Bash tool, where direnv does not run, prefix with
+`PATH=$PWD/.venv/bin:$PATH`.
 
 ## Conventions
 

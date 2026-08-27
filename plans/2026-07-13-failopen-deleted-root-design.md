@@ -126,19 +126,20 @@ Resulting shape-2 behavior (CPD is a worktree, treated as a plain root `E=CPD`):
   from main. The legitimate post-merge cleanup works, with one recoverable blip.
 
 **Consciously re-accepted:** an *accidental* self-destruct is no longer
-hard-blocked. Mitigations that make this acceptable: `git worktree remove` without
-`--force` already refuses a dirty worktree; `--force` is an explicit opt-in to
-destruction; the incident's real safety was the agent asking the user first;
-cwd-safety was never a data-loss guard; and fail-open makes the outcome
+hard-blocked. Mitigations that make this acceptable: `git worktree remove`
+without `--force` already refuses a dirty worktree; `--force` is an explicit
+opt-in to destruction; the incident's real safety was the agent asking the user
+first; cwd-safety was never a data-loss guard; and fail-open makes the outcome
 recoverable regardless. Fail-open also covers the deletion vectors the guard
 never could — another session removing the worktree, `git worktree prune`,
-external `rm`, a `source`d script — so it is the necessary backstop and the guard
-was only a narrow special-case on top of it.
+external `rm`, a `source`d script — so it is the necessary backstop and the
+guard was only a narrow special-case on top of it.
 
 ### What stays unchanged
 
 - Redirect tolerance in FR4/FR5a (`cd E 2>&1 && …`) — worktree-independent.
-- The embedded-`cd` block FR5b (`mkdir … && cd sub && …`) — worktree-independent.
+- The embedded-`cd` block FR5b (`mkdir … && cd sub && …`) —
+  worktree-independent.
 - Shape-1 worktree handling via `_worktree_root` (cwd inside a worktree of CPD)
   and its `ExitWorktree` advice — untouched; out of scope.
 
@@ -148,21 +149,23 @@ was only a narrow special-case on top of it.
   fail-open — a missing project dir is a different degenerate state, unchanged.
 - Root exists but `cwd` is deleted while root is fine: not the bricked case;
   `W != E` drift block applies as normal (root is a valid restore target).
-- Fail-open and a leading `cd` in the same command: fail-open wins (it is first),
-  so even `cd <anywhere>` is allowed while root is missing — intended; the agent
-  must be free to leave.
-- Symlinked / trailing-slash root: `os.path.isdir` follows symlinks and tolerates
-  a trailing slash, so a live-but-oddly-spelled root is *not* seen as deleted.
-  (The exact-match sharp edge of decision (d) is unaffected — that governs the
-  `cd E` *command* match, not existence detection.)
+- Fail-open and a leading `cd` in the same command: fail-open wins (it is
+  first), so even `cd <anywhere>` is allowed while root is missing — intended;
+  the agent must be free to leave.
+- Symlinked / trailing-slash root: `os.path.isdir` follows symlinks and
+  tolerates a trailing slash, so a live-but-oddly-spelled root is *not* seen as
+  deleted. (The exact-match sharp edge of decision (d) is unaffected — that
+  governs the `cd E` *command* match, not existence detection.)
 
 ## Testing (drives TDD)
 
-New/changed `tests/test_cwd_safety.py` cases (stdlib harness, subprocess-driven):
+New/changed `tests/test_cwd_safety.py` cases (stdlib harness,
+subprocess-driven):
 
-- **Fail-open, PreToolUse:** with `$CLAUDE_PROJECT_DIR` set to a **non-existent**
-  path, assert `ls`, an arbitrary `cd elsewhere`, and `mkdir -p x && cd x` are
-  all **allowed** (exit 0, no block), from both `W == E` and `W != E` payloads.
+- **Fail-open, PreToolUse:** with `$CLAUDE_PROJECT_DIR` set to a
+  **non-existent** path, assert `ls`, an arbitrary `cd elsewhere`, and
+  `mkdir -p x && cd x` are all **allowed** (exit 0, no block), from both
+  `W == E` and `W != E` payloads.
 - **Fail-open, PostToolUse:** with a non-existent root, assert the warning fires
   and its text names the root and says "disabled"/"restart" — and does **not**
   emit the generic `cd E` restore hint.

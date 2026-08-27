@@ -43,8 +43,8 @@ unchanged since.
 keep skills bundle + CLI-backing scripts"). The hooks, including
 `submodule-safety.py`, were removed with the rest of the workflow pipeline; the
 ecosystem was replaced by superpowers + autoMemory. The hook had been symlinked
-into `/Users/david/code/home/.claude/hooks/submodule-safety.py` (since `e065fbb`,
-2026-02-02) and into
+into `/Users/david/code/home/.claude/hooks/submodule-safety.py` (since
+`e065fbb`, 2026-02-02) and into
 `/Users/david/code/devddaanet/.claude/hooks/submodule-safety.py` (since
 `b7e48cd`); both symlinks were removed on 2026-04-02 (`38166be`, `1a70e58`) when
 agent-core gave way to the edify marketplace plugin.
@@ -62,12 +62,12 @@ Three things, all landed here between `fce900a` (scaffold) and `5223263`
 
 2. **Rule 3 — proactive leading-`cd` block, even from project root.** The
    agent-core hook only blocked non-root-form commands when `W != R`, so a bare
-   `cd subdir` issued *from* root was allowed and drift was caught only after the
-   fact by the `PostToolUse` warn. That means at least one command sequence runs
-   from a drifted cwd before anything fires — the exact failure mode the guard
-   exists to prevent. Since there is no legitimate need for a *persistent* cwd
-   change, blocking every non-root-anchored leading `cd` unconditionally costs
-   nothing and removes the whole class.
+   `cd subdir` issued *from* root was allowed and drift was caught only after
+   the fact by the `PostToolUse` warn. That means at least one command sequence
+   runs from a drifted cwd before anything fires — the exact failure mode the
+   guard exists to prevent. Since there is no legitimate need for a *persistent*
+   cwd change, blocking every non-root-anchored leading `cd` unconditionally
+   costs nothing and removes the whole class.
 
 3. **Plugin packaging.** Script relocated to `scripts/cwd-safety.py`, wired via
    `hooks/hooks.json` using `${CLAUDE_PLUGIN_ROOT}` so it resolves wherever the
@@ -75,5 +75,5 @@ Three things, all landed here between `fce900a` (scaffold) and `5223263`
    toolkit was vendored in the same window (`a35af41`).
 
 The dual-mode design and the `&&`-only invariant carried over untouched; see
-"Block vs warn at PreToolUse", "Only `&&` accepted", and "Dual-mode (Pre + Post)"
-in [design.md](../design.md).
+"Block vs warn at PreToolUse", "Only `&&` accepted", and "Dual-mode (Pre +
+Post)" in [design.md](../design.md).
