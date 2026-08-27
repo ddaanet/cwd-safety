@@ -27,7 +27,7 @@ current working directory `W`:
 |-----------|----------|
 | At root (`W == E`), command isn't a `cd` | **allow** silently |
 | `cd E` or `cd E && <cmd>` (root-anchored) | **allow** from anywhere |
-| At root (`W == E`), `cd <subdir> && <cmd>` | **rewrite** — append a newline and `cd <E>`, then allow |
+| At root (`W == E`), `cd <subdir> && <cmd>` | **rewrite** — append a blank line and `cd <E>`, then allow |
 | At root (`W == E`), a `set -e` script whose first statement enables errexit, with an embedded `cd` | **rewrite** — append the same restore line, then allow |
 | Any other leading `cd` (bare `cd subdir`, `cd ..`, `cd -`, `;`/`\|\|` tails) | **block** — even at root |
 | Drifted (`W != E`), any other command | **block**, with the restore command |
@@ -37,11 +37,13 @@ The pre-use side stops drift *before* it happens — a bare `cd <subdir>`
 is the most common cause, so it's refused outright, even from root. The
 ergonomic exceptions are both at root: a `cd <subdir> && <cmd>`, and a
 `set -e` script with an embedded `cd`, are each rewritten in place — a
-newline and `cd <E>` appended, so the directory change doesn't outlive the
-command — and allowed (announced on both channels), sparing the agent a
+blank line and `cd <E>` appended, so the directory change doesn't outlive
+the command — and allowed (announced on both channels), sparing the agent a
 block-then-reissue turn without letting cwd move. The restore is a trailing
 line rather than a wrapper: wrapping hides the command from the sandbox's
-`excludedCommands` matcher and mangles a trailing heredoc. For the second
+`excludedCommands` matcher and mangles a trailing heredoc. The separator is
+blank rather than a single newline so that a command ending in a `\`
+continuation cannot swallow the restore. For the second
 form `set -e` is only the trigger, not the guarantee — errexit is inert
 under the Bash tool, so it is the appended restore that keeps cwd at `E`.
 The post-use side is a backstop that warns after drift the pre-use gate
@@ -93,6 +95,11 @@ written — disabling the plugin removes the hook with it.
 - One effective root at a time — either `$CLAUDE_PROJECT_DIR` or the
   enclosing worktree of it. Worktrees are recognized; unrelated repos and
   arbitrary multi-root setups are not.
+- The guard fails open when it has no root to enforce: the effective root
+  was deleted out from under the session, or `$CLAUDE_PROJECT_DIR` is
+  unset. Every command is then allowed and the PostToolUse warning says
+  which state it is in. Neither repairs itself, so the guard stays off
+  until the session restarts.
 
 See `docs/design.md` for the full requirements and decisions, and
 `docs/changelog.md` for how they got that way.
