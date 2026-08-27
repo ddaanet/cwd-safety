@@ -12,7 +12,8 @@ in [worktrees.md](worktrees.md).
   and `||` never qualify · **(d)** the root is matched literally, with no
   normalization, traversal or prefix match · **(j)** redirections are tolerated
   between a `cd` target and its `&&`, and an embedded `cd` right after a
-  top-level separator is blocked
+  top-level separator or compound-body keyword is blocked, matched over a
+  quote/comment/heredoc/paren-masked copy of the command
 
 ---
 
@@ -44,14 +45,34 @@ and `cd a b && …`, a pathless `cd && …` and a bare `cd sub` do not.
 filename token that excludes `& | ; < > ( )`. Bounded so it can never swallow
 the `&&` or introduce a second command.
 
-**`_EMBEDDED_CD` — FR5b.** `(?:&&|\|\||;|&|\n)\s*cd(?:\s|;|&|$)`: a `cd`
-immediately after a top-level sequencing operator or newline. A `(cd sub && …)`
-subshell and a `foo | cd sub` pipeline (single `|`, its `cd` runs in a subshell)
-are never caught, because the `cd` there does not follow one of those
-separators. It is a drift detector, not a shell parser: a quoted literal or
-heredoc body containing `&& cd` / `; cd`, and a `cd` that is not the first
-statement of a subshell (`(set -e; cd x; …)`), are known false positives that
-only ever block.
+**`_EMBEDDED_CD` over `_mask_opaque` — FR5b.**
+`(?:&&|\|\||;|&|\n|\{|(?<!\S)(?:then|do)(?=\s))\s*cd(?:\s|;|&|$)`: a `cd`
+immediately after a top-level sequencing operator, a newline, or a
+compound-body opener (`then`, `do` as whole words; `{`). It is searched in
+`_mask_opaque(command)`, never the raw command. The mask is a single
+left-to-right scan that replaces, character for character, everything that
+cannot hold a current-shell `cd` with spaces (newlines are kept, so the
+separator set is unchanged): `'…'`, `"…"` (with `\"` escapes) and `` `…` ``
+strings; a `\`-escaped character; a word-initial `#` comment to end of line
+(`$#` and `a#b` are not comments); a heredoc body — `_HEREDOC` recognises
+`<<`/`<<-` with a bare or quoted delimiter word, the body runs from the next
+newline to the line equal to the delimiter, leading tabs stripped for `<<-`,
+several heredocs on one line consumed in order; and every character inside
+parentheses at any depth, which covers a `( … )` subshell, `$( … )` and
+`<( … )` alike. Depth is clamped at zero, so a `case` pattern's lone `)` cannot
+blank the rest of the command, and `$(( … ))` arithmetic is simply two nested
+regions. An unterminated quote blanks to the end of the command.
+
+So `mkdir x && (cd x && ls)`, `(set -e; cd x; make)`, `echo "x && cd y"`,
+`python3 - <<'EOF' … EOF` with a body that mentions `; cd`, and `ls # && cd`
+are all allowed, while `cat <<EOF && cd sub`, `cat <<EOF … EOF` followed by
+`cd sub` on the next line, `if …; then cd sub; fi`, `true && { cd sub; }` and
+`x=$((1+2)); cd sub` are blocked. A `foo | cd sub` pipeline is never caught
+(single `|` is not a separator; its `cd` runs in a subshell). What the scanner
+does not model — `eval`, `builtin cd`, `command cd`, `\cd`, a `cd` in a
+function body counted at definition rather than at call — only ever costs a
+missed block or a spurious one. The scanner feeds FR5b alone and never the
+root anchor.
 
 **`_SET_ERREXIT` with `_LEADING_SKIP` — FR5c's trigger.** After skipping
 leading blank and `#`-comment lines, `_starts_with_errexit` requires the first
@@ -101,8 +122,11 @@ detection (decision (h)) reads the filesystem, but only to *find* `E`; the
 
 **Decision:** (1) The root-anchored allow (FR4) and the restore rewrite (FR5a)
 tolerate shell redirections between the `cd` target and the `&&`. (2) An
-embedded `cd` running in the current shell right after a top-level separator
-(FR5b) is blocked, even though `cd` is not the command's leading token.
+embedded `cd` running in the current shell right after a top-level separator or
+a compound-body keyword (FR5b) is blocked, even though `cd` is not the command's
+leading token. (3) The embedded-`cd` match runs over a masked copy of the
+command — quotes, comments, heredoc bodies and parenthesised regions blanked —
+produced by a stdlib scanner, not by a shell parser.
 
 **Rationale:** Both address natural command forms the matchers mishandled.
 `cd <dir> 2>&1 && <cmd>` — capturing the `cd`'s own diagnostics — was blocked
@@ -119,15 +143,32 @@ The embedded-cd block narrows the "contrived `cd E && cd subdir` passes" gap for
 its most common real shape, `<setup> && cd <subdir> && <work>`, which drifts
 from root and was previously only caught after the fact by PostToolUse. It is a
 deliberately *narrow* regex, not a shell parser: requiring the `cd` to
-immediately follow the separator excludes a hand-written `(cd sub && …)`
-subshell and pipe subshells for free, and the residual false positives (a quoted
-`"&& cd"` literal; a no-op `echo x && cd E`) only ever *block* — the agent
-re-forms the command — so they cost ergonomics, never safety. This is a targeted
-retreat from the "don't chase an exhaustive blocklist" non-goal, not an
-abandonment of it: PostToolUse remains the backstop for `pushd`, `source`,
-`&& cd` inside a root-anchored FR4 command, and everything the regex cannot see.
-The contrived leading form `cd E && cd sub && …` is *not* covered — it satisfies
-FR4 and is allowed by design.
+immediately follow the separator excludes pipe subshells for free, and
+`then`/`do`/`{` are in the separator set because a `cd` in a conditional, loop
+or group body runs in the current shell exactly as a `&& cd` does. The
+residual false positives (a no-op `echo x && cd E`; a function body that `cd`s,
+counted at definition) only ever *block* — the agent re-forms the command — so
+they cost ergonomics, never safety. This is a targeted retreat from the "don't
+chase an exhaustive blocklist" non-goal, not an abandonment of it: PostToolUse
+remains the backstop for `pushd`, `source`, `&& cd` inside a root-anchored FR4
+command, and everything the regex cannot see. The contrived leading form
+`cd E && cd sub && …` is *not* covered — it satisfies FR4 and is allowed by
+design.
+
+The mask exists because the raw regex blocked on text that merely *mentions* a
+`cd`: a quoted literal, a `#` comment, a heredoc body (a script fed to
+`python3 - <<'EOF'` that contains `; cd` — hit in practice, and the agent's only
+way out was to move the script into a file), and a `cd` that is not the first
+statement of a subshell (`(set -e; cd x; …)`). Each of those regions is
+delimited by tokens a left-to-right scan can pair without a grammar — quote to
+quote, `<<WORD` to the `WORD` line, `(` to `)` — so blanking them costs one
+pass over the command and nothing outside the stdlib. The scanner is
+deliberately not asked to understand what it blanks: it never decides *which*
+`cd` is the drift, only which characters cannot be one. Its own errors are
+bounded the same way the regex's are — a misjudged region either hides a real
+`cd` (a missed block, PostToolUse catches the drift) or exposes text that
+looks like one (a spurious block, the agent re-forms) — and it feeds FR5b
+alone, so decisions (c) and (d) are untouched by it.
 
 ---
 
@@ -152,3 +193,21 @@ parser (chosen over in brainstorming).
 **Leave embedded `cd` to PostToolUse entirely** (j). Rejected: the drift
 executes at least one command from the wrong cwd before the warning fires, the
 failure mode the block exists to prevent.
+
+**Parse the command with tree-sitter-bash instead of masking** (j). Rejected on
+deployment, not on quality. Probed against 32 commands covering every known
+false positive and the compound-body shapes, `tree-sitter-bash` 0.25.1 was
+right on all of them, and loading the grammar costs about 50 ms. But both
+`tree-sitter` and the grammar are C extensions (about 3.5 MB installed), the
+hook runs under whatever `python3` Claude Code's environment resolves — the
+system interpreter in one shell, a project venv under direnv in another — and a
+plugin has no install step. An optional import with a regex fallback makes the
+guard's behaviour depend on which `python3` wins `PATH` on each machine and is
+silently the fallback for every other user of the plugin; vendoring wheels
+means per-platform, per-ABI binaries in the plugin repository for a hook of a
+few hundred lines. It would also break NFR3 outright. The pure-Python `bashlex`
+fails the same test on its own terms: GPLv3 against the plugin's MIT, and it
+rejects `<<'EOF'` heredocs and `$( … )` — the very cases at issue. The scanner
+reproduces the parser's verdict on every probed case with no dependency, and
+because FR5b's failure modes are bounded either way, the parser's extra
+precision buys nothing the guard can use.

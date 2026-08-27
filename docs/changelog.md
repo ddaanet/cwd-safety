@@ -8,6 +8,10 @@ overturned, it is rewritten in place and the reversal gets an entry here.
 
 Newest first.
 
+- [2026-08-27 — FR5b matches over a masked command](changelog/2026-08-27-mask-before-embedded-cd.md)
+  — quoted, commented, heredoc and parenthesised `cd`s no longer block;
+  `then`/`do`/`{` join the separators; tree-sitter probed and rejected on
+  deployment.
 - [2026-08-27 — Restore line replaces the subshell](changelog/2026-08-27-restore-line-replaces-subshell.md)
   — `( … )` defeats the sandbox exclusion matcher and mangles a trailing
   heredoc, and `set -e` is inert under the Bash tool; the rewrite now appends a

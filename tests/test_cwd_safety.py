@@ -320,9 +320,59 @@ check("embedded: `mkdir x && (cd x && ls)` subshell allowed",
       allowed("PreToolUse", ROOT, "mkdir x && (cd x && ls)"))
 check("embedded: `foo | cd x` (pipe subshell) allowed",
       allowed("PreToolUse", ROOT, "foo | cd x"))
-# Known, accepted false positive: a quoted literal containing `&& cd` blocks.
-check("embedded: quoted `&& cd` literal blocks (documented false positive)",
-      blocked("PreToolUse", ROOT, 'echo "x && cd y"'))
+# FR5b masks quoted strings, heredoc bodies and parenthesised regions before
+# looking for a separator-adjacent `cd`, so text that only *mentions* a `cd`
+# never blocks, and a `cd` that is not the first statement of a subshell is
+# seen for the subshell it is.
+check("embedded: double-quoted `&& cd` literal allowed",
+      allowed("PreToolUse", ROOT, 'echo "x && cd y"'))
+check("embedded: single-quoted `; cd` literal allowed",
+      allowed("PreToolUse", ROOT, "echo 'x; cd y'"))
+check("embedded: escaped-quote juggling `'it'\"'\"'s'` still sees the real `&& cd`",
+      blocked("PreToolUse", ROOT, "echo 'it'\"'\"'s' && cd sub"))
+check("embedded: heredoc body mentioning `&& cd` allowed",
+      allowed("PreToolUse", ROOT, "python3 - <<'EOF'\nimport os\n# foo && cd sub\nEOF"))
+check("embedded: `<<-` heredoc body with tab-indented delimiter allowed",
+      allowed("PreToolUse", ROOT, "cat <<-EOF\n\tx; cd sub\n\tEOF"))
+check("embedded: `cd` after a heredoc's closing delimiter still blocked",
+      blocked("PreToolUse", ROOT, "cat <<EOF\nbody\nEOF\ncd sub"))
+check("embedded: `cd` on the heredoc's own command line still blocked",
+      blocked("PreToolUse", ROOT, "cat <<EOF && cd sub\nbody\nEOF"))
+check("embedded: `(set -e; cd x; make)` subshell allowed",
+      allowed("PreToolUse", ROOT, "(set -e; cd x; make)"))
+check("embedded: `$(cd sub && pwd)` substitution allowed",
+      allowed("PreToolUse", ROOT, "x=$(cd sub && pwd); echo $x"))
+check("embedded: `$(cd sub && pwd)` inside double quotes allowed",
+      allowed("PreToolUse", ROOT, 'echo "$(cd sub && pwd)" && ls'))
+check("embedded: `<(cd sub && ls)` process substitution allowed",
+      allowed("PreToolUse", ROOT, "diff <(cd sub && ls) <(ls)"))
+check("embedded: backtick `cd` allowed",
+      allowed("PreToolUse", ROOT, "x=`cd sub && pwd`; echo $x"))
+check("embedded: `case` pattern parens do not hide a later top-level `cd`",
+      blocked("PreToolUse", ROOT, "case x in a) echo a;; esac; cd sub"))
+check("embedded: arithmetic `$((1+2))` does not hide a later `cd`",
+      blocked("PreToolUse", ROOT, "x=$((1+2)); cd sub"))
+# A `cd` in the body of a compound statement runs in the current shell too.
+check("embedded: `if …; then cd sub; fi` blocked",
+      blocked("PreToolUse", ROOT, "if true; then cd sub; fi"))
+check("embedded: `for …; do cd $d; done` blocked",
+      blocked("PreToolUse", ROOT, "for d in a b; do cd $d; done"))
+check("embedded: `true && { cd sub; }` group blocked",
+      blocked("PreToolUse", ROOT, "true && { cd sub; }"))
+check("embedded: `f() { cd sub; }; f` blocked (a brace group is a body)",
+      blocked("PreToolUse", ROOT, "f() { cd sub; }; f"))
+check("embedded: `then`/`do` inside a word (`thence cd`) is not a separator",
+      allowed("PreToolUse", ROOT, "echo thence cd sub"))
+check("embedded: `#` comment mentioning `&& cd` allowed",
+      allowed("PreToolUse", ROOT, "ls # then && cd sub\necho done"))
+check("embedded: `$#` is not a comment, the `&& cd` after it still blocks",
+      blocked("PreToolUse", ROOT, "echo $# && cd sub"))
+check("embedded: a `cd` on the line after a comment still blocks",
+      blocked("PreToolUse", ROOT, "ls # note\ncd sub"))
+# An unterminated quote masks to the end and falls open to PostToolUse; bash
+# refuses the command anyway.
+check("embedded: unterminated quote before `&& cd` allowed (fail open)",
+      allowed("PreToolUse", ROOT, "echo 'x && cd sub"))
 
 # ── FR5c: a `set -e` script with an embedded `cd` gets a restore appended ─────
 # A `set -e`-first script is the agent's declared fail-fast intent; `set -e` is

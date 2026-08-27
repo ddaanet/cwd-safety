@@ -62,12 +62,22 @@ _REDIR = r"(?:&>>?\s*[^\s&|;<>()]+|\d*(?:>>|>|<)\s*[^\s&|;<>()]+|\d*[<>]&\d*)"
 _REDIRS = rf"(?:\s+{_REDIR})*"
 
 # An embedded `cd` that runs in the current shell right after a top-level
-# sequencing operator — `mkdir … && cd sub && …`, `echo x; cd sub`. The `cd`
-# must *immediately* follow the separator, so a `(cd sub && …)` subshell (a paren
-# sits before the `cd`) and a `foo | cd sub` pipeline (single `|`, not matched) are
-# never caught. This is a narrow drift detector, not a parser: a quoted literal
-# containing `&& cd` is a known, accepted false positive (it only causes a block).
-_EMBEDDED_CD = re.compile(r"(?:&&|\|\||;|&|\n)\s*cd(?:\s|;|&|$)")
+# sequencing operator — `mkdir … && cd sub && …`, `echo x; cd sub` — or as the
+# first statement of a compound body (`then cd`, `do cd`, `{ cd`). The `cd` must
+# *immediately* follow the separator, so a `foo | cd sub` pipeline (single `|`,
+# not matched) is never caught. Applied to `_mask_opaque(command)`, never the raw
+# command: quoted strings, heredoc bodies and every parenthesised region — a
+# `( … )` subshell, `$( … )`, `<( … )` — are blanked first, so a `cd` in any of
+# them is invisible and a `(set -e; cd x)` reads as the subshell it is. This is a
+# drift detector, not a parser (see docs/references/matchers.md).
+_EMBEDDED_CD = re.compile(
+    r"(?:&&|\|\||;|&|\n|\{|(?<!\S)(?:then|do)(?=\s))\s*cd(?:\s|;|&|$)"
+)
+
+# A heredoc operator and its delimiter word, as `_mask_opaque` recognises it:
+# `<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"`. The body runs from the next newline to
+# the line equal to the delimiter (leading tabs stripped for `<<-`).
+_HEREDOC = re.compile(r"<<(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
 
 # Leading blank lines and `#`-comment lines to skip before a command's first
 # effective statement (a shebang-like `#!/bin/bash` first line is one such comment).
@@ -231,6 +241,79 @@ def _cd_and_target(command: str) -> str:
     """
     m = _CD_AND.match(command)
     return _unquote(m.group(1)) if m else ""
+
+
+def _mask_opaque(command: str) -> str:
+    """``command`` with every region that cannot hold a current-shell ``cd``
+    blanked to spaces, same length, newlines kept.
+
+    Blanked: ``'…'`` and ``"…"`` strings, backticks, a ``\\``-escaped character,
+    a ``#`` comment (word-initial ``#`` to end of line; ``$#`` and ``a#b`` are
+    not comments), heredoc bodies (``<<``/``<<-``, quoted or bare delimiter),
+    and everything
+    inside parentheses at any depth — a ``( … )`` subshell, ``$( … )``,
+    ``<( … )``. Depth is clamped at zero so a ``case`` pattern's lone ``)``
+    cannot hide the rest of the command. An unterminated quote or backtick
+    blanks to the end; the command then looks ``cd``-free and falls through to
+    PostToolUse — bash refuses it anyway. This is a scanner, not a parser: it
+    feeds only ``_EMBEDDED_CD`` (FR5b), whose worst case is a missed block,
+    and never the root anchor.
+    """
+    out: list[str] = []
+    i, n, depth = 0, len(command), 0
+    pending: list[tuple[str, bool]] = []  # heredoc delimiters awaiting their body
+    while i < n:
+        c = command[i]
+        if c == "\\" and i + 1 < n:
+            out.append("  ")
+            i += 2
+            continue
+        if c in "'`" or c == '"':
+            j = i + 1
+            while j < n and command[j] != c:
+                j += 2 if c == '"' and command[j] == "\\" else 1
+            out.append(" " * (min(j, n - 1) + 1 - i))
+            i = j + 1
+            continue
+        if c == "#" and (i == 0 or command[i - 1] in " \t\n;&|("):
+            e = command.find("\n", i)
+            e = n if e < 0 else e
+            out.append(" " * (e - i))
+            i = e
+            continue
+        if c == "(":
+            depth += 1
+            out.append(" ")
+            i += 1
+            continue
+        if c == ")":
+            depth = max(0, depth - 1)
+            out.append(" ")
+            i += 1
+            continue
+        m = _HEREDOC.match(command, i)
+        if m:
+            pending.append((m.group(3), m.group(1) == "-"))
+            out.append(" " * len(m.group(0)))
+            i = m.end()
+            continue
+        if c == "\n" and pending:
+            out.append("\n")
+            i += 1
+            for delim, strip_tabs in pending:
+                while i < n:
+                    e = command.find("\n", i)
+                    e = n if e < 0 else e
+                    line = command[i:e]
+                    out.append(" " * (e - i) + ("\n" if e < n else ""))
+                    i = e + 1
+                    if (line.lstrip("\t") if strip_tabs else line) == delim:
+                        break
+            pending = []
+            continue
+        out.append(c if depth == 0 else " ")
+        i += 1
+    return "".join(out)
 
 
 def _starts_with_errexit(command: str) -> bool:
@@ -421,7 +504,7 @@ def handle_pretooluse(
     # (the `cd` does not immediately follow the separator). The block reuses the
     # FR5 message, which recommends the leading `cd <subdir> && <command>` form.
     if cwd == root:
-        if _EMBEDDED_CD.search(command):
+        if _EMBEDDED_CD.search(_mask_opaque(command)):
             # FR5c: a `set -e`-first script gets a `cd root` restore appended
             # instead of blocked. The `set -e` is the agent's declared
             # fail-fast intent, but it is inert under the Bash tool (the command

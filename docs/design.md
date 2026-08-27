@@ -76,13 +76,17 @@ same command is blocked (FR6). Mechanism and announcement text in
 
 **FR5b (embedded-cd block).** On `PreToolUse`, when `W == E`: a command that is
 not itself a leading `cd` but contains a `cd` running in the current shell right
-after a top-level sequencing operator (`&&`, `||`, `;`, `&`, or a newline) —
-e.g. `mkdir -p tools && cd tools && …` — is blocked with the FR5 message. The
-`cd` must *immediately* follow the separator, so a `(cd sub && …)` subshell and
-a `foo | cd sub` pipeline are never caught. This is a narrow drift detector, not
-a shell parser; its false positives only block (see Limitations). The contrived
-leading form `cd E && cd sub && …` satisfies FR4 and is allowed. Decision (j),
-grammar in [matchers.md](references/matchers.md).
+after a top-level sequencing operator (`&&`, `||`, `;`, `&`, or a newline) or as
+the first statement of a compound body (`then cd`, `do cd`, `{ cd`) — e.g.
+`mkdir -p tools && cd tools && …` — is blocked with the FR5 message. The command
+is masked before matching: quoted strings, `#` comments, heredoc bodies and
+every parenthesised region (`( … )`, `$( … )`, `<( … )`) are blanked, so a `cd`
+inside any of them — a literal that mentions `&& cd`, a `python3 - <<'EOF'`
+script, `(set -e; cd x; …)` — is never caught, and neither is a `foo | cd sub`
+pipeline. This is a drift detector with a scanner in front of it, not a shell
+parser; what it still misses only drifts into PostToolUse (see Limitations).
+The contrived leading form `cd E && cd sub && …` satisfies FR4 and is allowed.
+Decision (j), grammar in [matchers.md](references/matchers.md).
 
 **FR5c (`set -e` restore rewrite).** On `PreToolUse`, when `W == E`: a command
 whose first effective statement (after leading blank or `#`-comment lines) is a
@@ -261,12 +265,13 @@ actively misleads about the scope of the guard.
 - **(d)** — the root is matched literally: no normalization, no traversal, no
   prefix match
 - **(j)** — redirections are tolerated between a `cd` target and its `&&`; an
-  embedded `cd` right after a top-level separator is blocked, by a narrow regex
-  rather than a parser
+  embedded `cd` right after a top-level separator or compound-body keyword is
+  blocked, by a regex over a quote/heredoc/paren-masked command rather than a
+  parser
 
 *Rejected:* `;` for ergonomics · normalizing both sides before matching ·
 arbitrary tokens between the target and `&&` · rewriting an embedded `cd` into
-a subshell · leaving embedded `cd` to PostToolUse.
+a subshell · leaving embedded `cd` to PostToolUse · a tree-sitter bash parse.
 
 **Worktrees and the deleted root** — how `E` is found, and what happens when
 it is gone. [worktrees.md](references/worktrees.md)
@@ -315,15 +320,16 @@ embedded-`cd` script.
   catches the *non*-leading shape (`<setup> && cd subdir && …`) but deliberately
   does **not** touch this leading-`cd E &&` form, which FR4 allows by design.
 
-- **Embedded-cd detection is a regex, not a parser.** FR5b flags a `cd` only
-  when it immediately follows a top-level separator. It misses a `cd` reached
-  another way (inside `$(…)` that escapes to the parent, an aliased/function
-  `cd`) and false-positives on any `&& cd` / `; cd` / newline-`cd` that is not
-  at top level: a quoted literal, a heredoc body (a script fed to
-  `python3 - <<'EOF'` that mentions `; cd`), or a `cd` that is not the first
-  statement of a subshell (`(set -e; cd x; …)`). Each only blocks, so it is safe
-  if inconvenient — the agent re-forms, typically by moving the text into a
-  file. PostToolUse remains the ultimate backstop.
+- **Embedded-cd detection is a masked regex, not a parser.** FR5b flags a `cd`
+  only when it immediately follows a top-level separator or a `then`/`do`/`{`,
+  after quoted strings, comments, heredoc bodies and parenthesised regions are
+  blanked. It misses a `cd` reached another way — `eval`, `builtin cd`,
+  `command cd`, `\cd`, an aliased or function `cd`, `pushd` — and a function
+  body that `cd`s blocks on definition, whether or not the function is called.
+  An unterminated quote blanks to the end and the command falls through
+  unblocked (bash refuses it anyway). Every residual error is a missed block
+  or a spurious one, never a loosened root anchor; PostToolUse remains the
+  ultimate backstop.
 
 - **FR5c triggers on errexit only from the first statement.** A `set -e` reached
   any other way — a later statement (`foo; set -e; cd x`), or one whose spelling
