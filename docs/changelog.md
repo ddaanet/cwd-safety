@@ -8,6 +8,10 @@ overturned, it is rewritten in place and the reversal gets an entry here.
 
 Newest first.
 
+- [2026-08-28 — The restore rewrite no longer settles the permission gate](changelog/2026-08-28-rewrite-drops-allow-decision.md)
+  — `permissionDecision: "allow"` alongside `updatedInput` skipped the auto-mode
+  classifier for every rewritten command's tail; the hook now emits
+  `updatedInput` alone and the ordinary permission pipeline decides.
 - [2026-08-27 — Shell-gotchas scan: four fixes and FR7b](changelog/2026-08-27-shell-gotchas-scan.md)
   — the restore is separated by a blank line so a `\` continuation cannot
   swallow it; `_HEREDOC` takes hyphenated delimiters; no `$CLAUDE_PROJECT_DIR`

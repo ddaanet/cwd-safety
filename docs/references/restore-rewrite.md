@@ -19,8 +19,10 @@ the worktree cross-root exclusion is grounded in [worktrees.md](worktrees.md).
 ## Mechanism
 
 Both triggers go through `_rewrite_with_restore`, which returns
-`permissionDecision: "allow"` with `hookSpecificOutput.updatedInput` replacing
+`hookSpecificOutput.updatedInput` — and no `permissionDecision` — replacing
 the command `C` with `C`, a blank line, and `cd <E>` (`E` shell-quoted). The
+rewritten command then runs through the ordinary permission pipeline (decision
+(i)). The
 restore is a separate line, never a `( … )` subshell and never a `;`: a
 subshell hides the command from the sandbox's `excludedCommands` matcher, and
 a newline keeps a trailing heredoc or `# comment` intact. The line is *blank*
@@ -116,9 +118,24 @@ terminates the continuation (the `\` joins to the empty line and the statement
 ends), and is inert everywhere else: it lands after any heredoc's closing
 delimiter, so nothing a heredoc, comment or list can do is affected by it.
 
-This is still **free on the security axis** in the sense that matters: the
-appended `cd E` is the exact-match root path, shell-quoted, and the agent's
-command is otherwise untouched. What changes is *how* cwd is kept: by a trailing
+This is **free on the security axis** on both counts it has to be. On the
+*command text*: the appended `cd E` is the exact-match root path, shell-quoted,
+and the agent's command is otherwise untouched. On the *permission gate*: the
+output carries `updatedInput` alone, with no `permissionDecision`, so the
+rewritten command is handed back to the ordinary pipeline — deny and ask rules,
+the read-only auto-allow, then the auto-mode classifier — exactly as an
+unmodified command would be. Pairing `updatedInput` with
+`permissionDecision: "allow"` would instead settle the gate from inside the
+hook: the caller's only re-check is a narrow one for a matching deny or ask
+rule, and the classifier is never consulted. That would pre-approve every
+rewritten command on the strength of a rule that only ever meant "this `cd`
+does not persist", while the tail after the `&&` — which the hook does not
+inspect and which is arbitrary — rides along unchecked and leaves no trace in
+the transcript, since a Bash `toolUseResult` carries no permission decision.
+Not pre-approving costs nothing on the turn axis (the rewrite still saves the
+block-and-reissue turn); on the permission axis a read-only tail is auto-allowed
+locally and anything else meets the classifier, one model call over cached
+context. What changes is *how* cwd is kept: by a trailing
 statement rather than by construction. A tail that `exec`s, `exit`s, or kills
 the shell skips the restore and drifts — the same class of drift `pushd` causes
 — and PostToolUse (FR7, decision (e)) is the backstop for it, exactly as before.

@@ -63,10 +63,11 @@ absolute paths or `git -C <dir>`, the `cd E && <command>` form, and the leading
 form `cd <dir> && <rest>` — a leading `cd` to a single directory argument
 (quoted or backslash-escaped spaces allowed, redirections allowed before the
 `&&`) joined by `&&` to a non-empty tail, not satisfying FR4 — is **not**
-blocked. The hook returns `permissionDecision: "allow"` with
-`hookSpecificOutput.updatedInput` replacing the command with `C`, a blank line,
-and `cd <E>` (shell-quoted), so cwd is restored by the trailing statement —
-never a `( … )` subshell, never `;`. The rewrite is announced on both channels,
+blocked. The hook returns `hookSpecificOutput.updatedInput` — and no
+`permissionDecision`, so the rewritten command still runs through the ordinary
+permission pipeline — replacing the command with `C`, a blank line, and
+`cd <E>` (shell-quoted), so cwd is restored by the trailing statement — never a
+`( … )` subshell, never `;`. The rewrite is announced on both channels,
 never silent, and neither note echoes the command. Excluded, falling through to
 the FR5 block: a bare `cd <dir>`; a pathless `cd && …`; `cd a b && …`; the `;`
 and `||` separators; and, while a worktree is active, a `cd` to

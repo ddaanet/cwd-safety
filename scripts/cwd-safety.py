@@ -378,8 +378,16 @@ _SET_E_USER_NOTE = "Appended a cd back to root after set -e script."
 def _rewrite_with_restore(
     hook_input: dict, command: str, root: str, agent_note: str, user_note: str
 ) -> None:
-    """Allow ``command`` with a ``cd <root>`` restore line appended, and
+    """Rewrite ``command`` with a ``cd <root>`` restore line appended, and
     announce the rewrite on both channels. Exits 0.
+
+    The output carries ``updatedInput`` and **no** ``permissionDecision``: the
+    hook rewrites, it does not decide. Pairing the two would settle the
+    permission gate here, and the caller would run only a narrow deny/ask
+    re-check over the result — the auto-mode classifier would never see the
+    tail, which is arbitrary and which this hook never inspected. Without a
+    decision the caller replaces the working input and runs the full pipeline
+    over it, exactly as it would for a command the agent wrote itself.
 
     The restore is a separate line, not a `( … )` subshell: the sandbox's
     `excludedCommands` matcher only splits `program`/`list`/`pipeline` nodes,
@@ -402,8 +410,6 @@ def _rewrite_with_restore(
     output = {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
-            "permissionDecision": "allow",
-            "permissionDecisionReason": "cd back to the effective root appended",
             "additionalContext": agent_note,
             "updatedInput": new_input,
         },

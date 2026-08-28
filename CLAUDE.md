@@ -89,8 +89,9 @@ rumdl; under the Bash tool, where direnv does not run, prefix with
   `_SET_ERREXIT`, `_EMBEDDED_CD`) are not security-critical — a wrong match
   only subshells or blocks — and must never feed the root anchor.
 - **Output channels.** Block = stderr + exit 2. PostToolUse warning =
-  non-blocking JSON on stdout. Rewrite (FR5a/FR5c) = exit 0 with an `allow`
-  decision plus `hookSpecificOutput.updatedInput`, both triggers through
+  non-blocking JSON on stdout. Rewrite (FR5a/FR5c) = exit 0 with
+  `hookSpecificOutput.updatedInput` and **no `permissionDecision`** — the hook
+  rewrites, the permission pipeline still decides — both triggers through
   `_rewrite_with_restore`; the dual-channel announcement is mandatory
   (decision (i)). Never soften agent-facing text into something readable as
   an instruction to bypass.

@@ -104,11 +104,15 @@ def blocked_with(event, cwd, command, needle, root=ROOT):
 def rewritten(event, cwd, command, expected_cmd, root=ROOT):
     """Assert: a PreToolUse input rewrite.
 
-    Exit 0, empty stderr, and an allow-decision JSON on stdout whose
-    `updatedInput.command` equals `expected_cmd`. The rewrite is announced on
-    both channels (agent: `additionalContext`, user: `systemMessage`), but the
-    command itself is NOT echoed to the user — Claude Code already surfaces the
-    rewritten command, so re-echoing it is bloat.
+    Exit 0, empty stderr, and a JSON on stdout whose `updatedInput.command`
+    equals `expected_cmd`. There is **no** `permissionDecision`: pairing one
+    with `updatedInput` would settle the permission gate from the hook, so the
+    rewritten command — whose tail the hook never inspected — would skip the
+    auto-mode classifier. Without it the caller runs the ordinary pipeline over
+    the rewritten input. The rewrite is announced on both channels (agent:
+    `additionalContext`, user: `systemMessage`), but the command itself is NOT
+    echoed to the user — Claude Code already surfaces the rewritten command, so
+    re-echoing it is bloat.
     """
     code, out, err = run(event, cwd, command, root)
     if code != 0 or err != "" or not out:
@@ -120,7 +124,7 @@ def rewritten(event, cwd, command, expected_cmd, root=ROOT):
     hso = parsed.get("hookSpecificOutput", {})
     sysmsg = parsed.get("systemMessage", "")
     return (
-        hso.get("permissionDecision") == "allow"
+        "permissionDecision" not in hso  # the hook must not settle the gate
         and hso.get("updatedInput", {}).get("command") == expected_cmd
         and bool(hso.get("additionalContext"))  # agent is told cwd did not persist
         and bool(sysmsg)                         # user is notified
