@@ -1,3 +1,5 @@
 ## Current task
 
-The 0.6.0 release cycle is closed: the tag, the GitHub release and the marketplace bump all landed, the diverged `ddaanet` tier was merged, and every memory store reports published. The one thread left open is the memory index retirement pass, which was deliberately kept out of the merge because deciding which entries to retire is a judgement call rather than mechanical work.
+Nothing in flight. cwd-safety 0.6.1 is released and is the tip. Memory is published: the diverged `ddaanet` tier was merged (one real conflict, the description of `gitlore-memory-administration-no-parent-commit.md`, resolved to upstream's "approve the summary and stop" wording) and both the tier and memory store reached `origin/live`. Publishing needs the command sandbox disabled, which blocks `github.com:22`.
+
+The one open thread is the memory index retirement pass.
