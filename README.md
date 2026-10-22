@@ -101,8 +101,10 @@ written — disabling the plugin removes the hook with it.
   which state it is in. Neither repairs itself, so the guard stays off
   until the session restarts.
 
-See `docs/design.md` for the full requirements and decisions, and
-`docs/changelog.md` for how they got that way.
+## Development
+
+The full requirements and decisions are in the
+[design document](https://github.com/ddaanet/cwd-safety/blob/main/docs/design.md).
 
 ## License
 

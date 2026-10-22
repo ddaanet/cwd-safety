@@ -12,3 +12,5 @@ __pycache__/
 # uv dev tooling (`uv sync`), see pyproject.toml.
 .venv/
 /.mcp.json
+
+/dist/plugin/

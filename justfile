@@ -1,4 +1,8 @@
 import 'plugin-dev/release.just'
+import 'plugin-dev/gates.just'
+
+# Tool versions no lockfile pins: python3 runs py_compile and the suite, jq the manifests.
+export PLUGIN_DEV_GATE_TOOLS := "python3 --version\njq --version"
 
 # cwd-safety plugin — dev recipes
 
@@ -8,12 +12,15 @@ _default:
 
 # Lint manifests + hooks.json, byte-compile the hook, run the test suite,
 # rewrap the docs and check the docs graph.
-precommit: format-docs check-docs
+precommit: format-docs check-docs check-refs
+    #!{{ plugin_dev_gate_prolog }}
+    sentinel-guard precommit .claude-plugin hooks scripts tests .gitignore
     jq . .claude-plugin/plugin.json > /dev/null
     jq . hooks/hooks.json > /dev/null
     python3 -m py_compile scripts/cwd-safety.py tests/test_cwd_safety.py
     python3 tests/test_cwd_safety.py
-    @echo "ok"
+    echo "ok"
+    record-sentinel
 
 # Hard-wraps prose in docs/ and plans/ so a line count means something. rumdl
 # comes from uv.lock via `uv sync`, on PATH through `.envrc`; the pin check
