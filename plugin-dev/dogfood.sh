@@ -1,0 +1,389 @@
+#!/usr/bin/env bash
+# Dogfood launcher for a plugin that vendors this toolkit. Vendored at
+# <root>/plugin-dev/dogfood.sh; <root> is always found from the script's own
+# location, never from CLAUDE_PROJECT_DIR or a hook payload's cwd (a resumed
+# session can carry a foreign one).
+#
+#   sync           mirror the plugin tree into <root>/dist/plugin/
+#   pre-tool       PreToolUse hook: read the payload on stdin, deny an edit
+#                  into <root>/dist/plugin/; exit 0 on either verdict, empty
+#                  stdout when allowing
+#   session-start  SessionStart hook: warn when this session does not load
+#                  <root>/dist/plugin/, when it names that path and no
+#                  directory is there, or when jq is missing; exit 0, empty
+#                  stdout when silent
+set -euo pipefail
+unset CDPATH # else a relative cd searches it and prints its target
+
+main() {
+    case "${1:-}" in
+        sync) sync_copy ;;
+        pre-tool) pre_tool ;;
+        session-start) session_start ;;
+        *) usage ;;
+    esac
+}
+
+usage() {
+    echo "usage: dogfood.sh sync|pre-tool|session-start" >&2
+    exit 2
+}
+
+# The copy is the source tree minus what git ignores, in the repo or in any
+# initialised submodule, minus .git, minus the copy itself. rsync gets the
+# ignored paths as an exclude list (see list_ignored), each anchored with a
+# leading slash and NUL-separated, so a name holding a space or a newline
+# survives. The list is written out in full before rsync starts: fed through a
+# pipe, a git failure would leave rsync running on a partial list, copying .git
+# and recursing into the copy. Deletions propagate: a path that stops being
+# source leaves the copy. rsync's stderr is left alone, and its exit status is
+# the script's. Before anything else touches the tree, sync refuses a root with
+# no plugin manifest, a root where git does not ignore dist/plugin/, and a PATH
+# with no rsync; each refusal is one dogfood: line naming the path or the
+# command, exit 1, dist/ untouched. Without the rsync check, the mkdir would
+# leave an empty copy that the shim launches as a promoted one.
+#
+# With a dist.include at the root, the copy holds only the paths dist.sh paths
+# lists, still from the working tree and still minus ignored paths. dist.sh
+# writes its list to a file, never a pipe, and its status decides: 0 takes the
+# allowlist, 3 (no dist.include) syncs as above, 1 or any other status refuses
+# before dist/ is touched. The allowlisted sync hands rsync one NUL-delimited
+# filter file as a merge: the ignored-path excludes first, so an ignored file
+# inside a listed directory stays out, then a rule for each parent directory of
+# a listed path, then the path itself, or for a directory the directory and its
+# contents, then `- *` for the rest. A dist.include with no dist.sh beside this
+# script refuses the sync, since copying without the list would ship what the
+# list leaves out.
+sync_copy() {
+    local root dist status=0 allowlisted=0
+    root="$(root_dir && printf x)"
+    root="${root%x}"
+    require_manifest "$root"
+    require_ignored_copy "$root"
+    require_rsync
+    # Not local: the EXIT trap reads it after sync_copy has returned.
+    work="$(mktemp -d "${TMPDIR:-/tmp}/dogfood.XXXXXX")"
+    trap 'rm -rf "$work"' EXIT
+    list_ignored "$root" "" >"$work/excludes"
+    printf '%s\0' '.git' '/dist/plugin/' >>"$work/excludes"
+    dist="$(dist_path && printf x)"
+    dist="${dist%x}"
+    if [[ -f "$dist" ]]; then
+        bash "$dist" paths "$root" >"$work/listed" || status=$?
+        case "$status" in
+            0) allowlisted=1 ;;
+            3) ;;
+            # dist.sh has printed its dist: line.
+            1) exit 1 ;;
+            *)
+                printf 'dogfood: %s paths exited %s; sync refused\n' "$dist" "$status" >&2
+                exit 1
+                ;;
+        esac
+    elif [[ -e "$root/dist.include" || -L "$root/dist.include" ]]; then
+        printf 'dogfood: %s is not found, but %s/dist.include is present; sync refused\n' "$dist" "$root" >&2
+        exit 1
+    fi
+    if [[ "$allowlisted" == 1 ]]; then
+        filter_rules "$root" >"$work/filters"
+    fi
+    mkdir -p "$root/dist/plugin"
+    if [[ "$allowlisted" == 1 ]]; then
+        rsync -a --delete --delete-excluded --from0 --filter=". $work/filters" \
+            "$root/" "$root/dist/plugin/"
+    else
+        rsync -a --delete --delete-excluded --from0 --exclude-from=- \
+            "$root/" "$root/dist/plugin/" <"$work/excludes"
+    fi
+}
+
+# filter_rules <root>: print the NUL-delimited filter rules of an allowlisted
+# sync, from $work/excludes and $work/listed. A listed path is literal: dist.sh
+# refused glob and escape characters. A symlink is not a directory to rsync, so
+# it takes a file rule even when it names one.
+filter_rules() {
+    local rule p parent
+    while IFS= read -r -d '' rule; do
+        printf -- '- %s\0' "$rule"
+    done <"$work/excludes"
+    while IFS= read -r -d '' p; do
+        parent="$p"
+        while [[ "$parent" == */* ]]; do
+            parent="${parent%/*}"
+            printf -- '+ /%s/\0' "$parent"
+        done
+        if [[ -d "$1/$p" && ! -L "$1/$p" ]]; then
+            printf -- '+ /%s/\0+ /%s/***\0' "$p" "$p"
+        else
+            printf -- '+ /%s\0' "$p"
+        fi
+    done <"$work/listed"
+    printf -- '- *\0'
+}
+
+# dist_path: the physical path of dist.sh beside this script, printed with no
+# trailing newline. Found the way root_dir finds the root, with the same x
+# shield; each step is chained, since errexit is off inside $(...).
+dist_path() {
+    local here
+    here="$(dirname "${BASH_SOURCE[0]}" && printf x)" &&
+        (cd -P -- "${here%?x}" && printf '%s/dist.sh' "$PWD")
+}
+
+# list_ignored <dir> <prefix>: print, NUL-terminated, the untracked ignored
+# entries of the repo at <dir>, then those of each initialised submodule in
+# turn, recursively, each entry as /<prefix><entry>, where <prefix> is <dir>
+# relative to the root with a trailing slash ("" for the root itself). The
+# root's ls-files does not descend into a submodule, whose own ignores would
+# otherwise be copied, and git submodule foreach runs its command under sh,
+# which has no read -d ''. A submodule is a gitlink, mode 160000 in
+# ls-files -s, and is initialised when it holds a .git, file or directory.
+# Each git listing goes to its own scratch file under $work and is read from
+# there, never through a pipe or a process substitution: as a simple command,
+# a git failure ends the script under errexit, which also holds in the
+# recursion, called as a plain statement and never as a condition. Reads use
+# fd 3, since the recursion runs inside the caller's loop. An entry holding
+# * ? [ ] or a backslash, prefix included, ends the script before rsync runs
+# or dist/ is touched: rsync reads the first four as wildcards and a backslash
+# as an escape only when a wildcard is present, so such names are refused
+# rather than escaped.
+list_ignored() {
+    local dir="$1" prefix="$2" ignored staged entry
+    ignored="$(mktemp "$work/ignored.XXXXXX")"
+    staged="$(mktemp "$work/staged.XXXXXX")"
+    git -C "$dir" ls-files -z -o -i --exclude-standard --directory >"$ignored"
+    while IFS= read -r -d '' -u 3 entry; do
+        entry="$prefix$entry"
+        case "$entry" in
+            *'*'* | *'?'* | *'['* | *']'* | *\\*)
+                printf "dogfood: ignored entry '%s' holds a pattern character (* ? [ ] or \\\\); sync refused\n" "$entry" >&2
+                exit 1
+                ;;
+        esac
+        printf '/%s\0' "$entry"
+    done 3<"$ignored"
+    git -C "$dir" ls-files -z -s >"$staged"
+    while IFS= read -r -d '' -u 3 entry; do
+        [[ "${entry%% *}" == 160000 ]] || continue
+        entry="${entry#*$'\t'}"
+        [[ -e "$dir/$entry/.git" ]] || continue
+        list_ignored "$dir/$entry" "$prefix$entry/"
+    done 3<"$staged"
+}
+
+# The copy is regenerated by sync, so an edit into it is lost and never reaches
+# the source. The verdict goes on permissionDecisionReason, worded to read after
+# Claude Code's "PreToolUse:<Tool> hook error:" prefix and offering no way past
+# the refusal, sync included: a mid-session sync is a promotion nobody asked
+# for. The source path goes on additionalContext, naming the denied path too,
+# since it arrives apart from the tool result; systemMessage is the one line for
+# the human. The object is built with jq --arg, never spliced. The edited path
+# is compared by its physical spelling against the physical <root>, so a
+# symlinked spelling of the copy is caught; the source path is derived from that
+# spelling too. An existing path that ends in a symlink is resolved in full with
+# readlink -f, chains included, as Claude Code's own check resolves it. A leaf
+# link that does not resolve (dangling, looping, or through a directory that
+# cannot be entered) is compared as spelled, so a Write through a dangling one
+# into the copy is not refused here. A payload jq cannot read, or a directory on
+# the path that cannot be entered, stops the script with exit 1: Claude Code
+# shows a non-blocking hook error, and its own sensitive-file ask still stands
+# before an edit into the copy. A jq failure, reading the payload or building
+# the deny, exits 1 with jq's stderr kept, never with jq's own status: jq exits
+# 2 on a usage or system error, and exit 2 from a PreToolUse hook blocks the
+# tool call. With no jq on PATH the guard stands down in silence rather than
+# fail every edit of the session; the session-start warning is where a missing
+# jq is reported.
+pre_tool() {
+    local root path physical rel copy="dist/plugin"
+    command -v jq >/dev/null || exit 0
+    root="$(root_dir && printf x)"
+    root="${root%x}"
+    # NotebookEdit names its target notebook_path, not file_path. Each x shields
+    # a trailing newline in the path from its capture's strip.
+    path="$(jq -j '.tool_input.file_path // .tool_input.notebook_path // ""' && printf x)" || exit 1
+    path="${path%x}"
+    physical="$(physical_path "$path" && printf x)"
+    physical="${physical%x}"
+    # physical_path resolves directories only. -n keeps readlink's own newline
+    # out of the capture; the x shields a newline in the name.
+    if [[ -L "$physical" && -e "$physical" ]]; then
+        physical="$(readlink -fn -- "$physical" && printf x)"
+        physical="${physical%x}"
+    fi
+    case "$physical" in
+        "$root/$copy/"*) ;;
+        *) exit 0 ;;
+    esac
+    rel="${physical#"$root/$copy/"}"
+    jq -nc --arg path "$path" --arg src "$root/$rel" --arg copy "$copy" '{
+        hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            permissionDecision: "deny",
+            permissionDecisionReason: ($path + " is in " + $copy + "/, the generated copy of this plugin. Edits to the copy are refused."),
+            additionalContext: ("The source of " + $path + " is " + $src + ". Make the edit there.")
+        },
+        systemMessage: ("dogfood: blocked an edit into " + $copy + "/ — the generated copy")
+    }' || exit 1
+}
+
+# Silent when some ":"-separated entry of CLAUDE_CODE_PLUGIN_DIRS is
+# <root>/dist/plugin, each entry compared whole, never by prefix, suffix or
+# substring, and <root>/dist/plugin is a directory. An absolute entry naming a
+# directory that can be entered is resolved with physical_path, since Claude
+# Code writes the variable back normalized and a symlinked spelling must still
+# match. Any other entry is compared as spelled, trailing slashes stripped: a
+# relative one, which Claude Code drops, never matches, and one that cannot be
+# entered puts no cd error on stderr. The payload is not read. Anything else
+# gets one object, in one of three shapes. The session names the path and no
+# directory is there, a shim launch before the first just dogfood, or a regular
+# file where the copy belongs: just dogfood, then /reload-plugins, no relaunch.
+# The session does not name it and there is no copy: just dogfood, then direnv
+# allow in the root and a relaunch of claude. The session does not name it and
+# the copy exists: direnv allow and a relaunch. direnv loads the .envrc that
+# puts the shim first on PATH; the user is never told the shim's path.
+# systemMessage is the one line for the human, opening with an ANSI reset so
+# Claude Code does not dim it like routine hook output. additionalContext gives
+# the agent the same finding as a fact and nothing to act on: no command, no way
+# to make the session load the copy, since the promotion and the relaunch are
+# the human's. The object is built with jq --arg, never spliced.
+# Without jq there is no object to build and no copy guard in pre-tool, so the
+# check is skipped and a static systemMessage says so; it stays off the agent's
+# channel, since only the human can install jq.
+session_start() {
+    local root copy rest entry named=0 no_copy
+    if ! command -v jq >/dev/null; then
+        printf '%s\n' '{"systemMessage":"\u001b[0mdogfood: jq is not on PATH, so the copy guard and this check are off until it is installed"}'
+        exit 0
+    fi
+    root="$(root_dir && printf x)"
+    root="${root%x}"
+    copy="$root/dist/plugin"
+    # Split by parameter expansion: the entries may hold spaces.
+    rest="${CLAUDE_CODE_PLUGIN_DIRS:-}:"
+    while [[ -n "$rest" ]]; do
+        entry="${rest%%:*}"
+        rest="${rest#*:}"
+        [[ -n "$entry" ]] || continue
+        if [[ "$entry" == /* && -d "$entry" && -x "$entry" ]]; then
+            # The x shields a trailing newline from the capture's strip.
+            entry="$(physical_path "$entry" && printf x)" || continue
+            entry="${entry%x}"
+        else
+            while [[ "$entry" == */ ]]; do entry="${entry%/}"; done
+        fi
+        if [[ "$entry" == "$copy" ]]; then
+            named=1
+            break
+        fi
+    done
+    no_copy="No copy exists at $copy, so this session loads none; plugin behaviour observed in it does not come from that path."
+    if [[ -d "$copy" && "$named" == 1 ]]; then
+        exit 0
+    elif [[ -d "$copy" ]]; then
+        warn_session "this session does not load $copy; run direnv allow in $root, then relaunch claude from a shell there" \
+            "This session does not load $copy, so plugin behaviour observed in it is not that of the promoted copy."
+    elif [[ "$named" == 1 ]]; then
+        warn_session "no copy at $copy yet; run just dogfood to create it, then /reload-plugins, no relaunch needed" "$no_copy"
+    else
+        warn_session "no copy at $copy, so this session does not load it; run just dogfood to create it, then direnv allow in $root and relaunch claude from a shell there" "$no_copy"
+    fi
+}
+
+# warn_session <message> <context>: the SessionStart object, the one-line
+# systemMessage for the human and the fact for the agent.
+warn_session() {
+    jq -nc --arg msg "$1" --arg ctx "$2" '{
+        systemMessage: ("\u001b[0mdogfood: " + $msg),
+        hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $ctx}
+    }'
+}
+
+# physical_path: the path where an edit would land, printed with no trailing
+# newline. A subshell walks it one name at a time, entering each existing
+# directory with cd -P, so a symlink anywhere up to the nearest existing
+# ancestor resolves. From the first name that is not an existing directory on,
+# the rest is kept as spelled, since an edit may create it, with each ..
+# dropping the name before it: the kernel cannot resolve a .. past a directory
+# that is not there yet, and the edit lands there whether the path is
+# normalised first or its missing directories are made first. Names are split
+# with parameter expansion and the result read from $PWD, never through a
+# $(...) capture, which would strip a name's trailing newline. Each cd is
+# chained, since errexit is off inside $(...): a failed cd must fail the call,
+# not print a half-resolved path.
+physical_path() {
+    [[ -n "$1" ]] || return 0
+    (
+        local rest="$1/" name tail=""
+        if [[ "$1" == /* ]]; then cd -P /; else cd -P .; fi || exit 1
+        while [[ -n "$rest" ]]; do
+            name="${rest%%/*}"
+            rest="${rest#*/}"
+            case "$name" in
+                "" | .) ;;
+                ..)
+                    if [[ -n "$tail" ]]; then
+                        tail="${tail%/*}"
+                    else
+                        cd -P .. || exit 1
+                    fi
+                    ;;
+                *)
+                    # An absolute operand names the directory in cd's error
+                    # and keeps one named - from reading as cd -.
+                    if [[ -z "$tail" && -d "$name" ]]; then
+                        cd -P -- "${PWD%/}/$name" || exit 1
+                    else
+                        tail="$tail/$name"
+                    fi
+                    ;;
+            esac
+        done
+        printf '%s' "${PWD%/}$tail"
+    )
+}
+
+require_manifest() {
+    if [[ ! -f "$1/.claude-plugin/plugin.json" ]]; then
+        printf 'dogfood: %s/.claude-plugin/plugin.json not found; sync refused\n' "$1" >&2
+        exit 1
+    fi
+}
+
+# The trailing slash matters: a first sync has no dist/plugin yet, and git
+# check-ignore on the bare name misses a /dist/plugin/ pattern. check-ignore
+# exits 1 for "not ignored" and 128 for a git error; only the 1 is a refusal,
+# a git error stops the script with git's own stderr.
+require_ignored_copy() {
+    local status=0
+    git -C "$1" check-ignore -q dist/plugin/ || status=$?
+    case "$status" in
+        0) ;;
+        1)
+            printf 'dogfood: %s/dist/plugin/ is not git-ignored; sync refused\n' "$1" >&2
+            exit 1
+            ;;
+        *) exit "$status" ;;
+    esac
+}
+
+require_rsync() {
+    if ! command -v rsync >/dev/null; then
+        echo 'dogfood: rsync is not on PATH; sync refused' >&2
+        exit 1
+    fi
+}
+
+# root_dir: the physical parent of this script's directory, printed with no
+# trailing newline and read from $PWD, never through a $(...) capture, so a
+# root whose name ends in a newline keeps it; each caller shields its own
+# capture with an x. The x after dirname shields the script directory's name
+# the same way, and ?x drops dirname's own newline with it. Runs inside $(),
+# where errexit is off, so each step is chained: a failed dirname must fail the
+# call, not fall through to the parent of an empty path, which is /.
+root_dir() {
+    local here
+    here="$(dirname "${BASH_SOURCE[0]}" && printf x)" &&
+        (cd -P -- "${here%?x}/.." && printf '%s' "$PWD")
+}
+
+main "$@"
